@@ -31,44 +31,107 @@ export function createDatabase(dbPath) {
       profile_id TEXT PRIMARY KEY,
       enabled INTEGER NOT NULL DEFAULT 0,
       folder_path TEXT,
-      display_order INTEGER NOT NULL DEFAULT 0,
-      last_run_at TEXT,
-      last_status TEXT
+      display_order INTEGER NOT NULL DEFAULT 0
     );
 
-    CREATE TABLE IF NOT EXISTS runs (
-      run_id TEXT PRIMARY KEY,
+    CREATE TABLE IF NOT EXISTS profile_runtime_config (
+      profile_id TEXT PRIMARY KEY,
+      field_delay_min_seconds REAL NOT NULL DEFAULT 1,
+      field_delay_max_seconds REAL NOT NULL DEFAULT 1,
+      row_interval_min_minutes REAL NOT NULL DEFAULT 1,
+      row_interval_max_minutes REAL NOT NULL DEFAULT 1
+    );
+
+    CREATE TABLE IF NOT EXISTS profile_runtime_state (
+      profile_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL DEFAULT 'idle',
+      active_execution_id TEXT,
+      current_row_number INTEGER,
+      last_error_code TEXT,
+      last_error_detail TEXT,
+      last_run_status TEXT,
+      last_run_started_at TEXT,
+      last_run_ended_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS profile_executions (
+      execution_id TEXT PRIMARY KEY,
+      profile_id TEXT NOT NULL,
       status TEXT NOT NULL,
-      max_concurrency INTEGER NOT NULL,
       started_at TEXT NOT NULL,
-      ended_at TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS run_items (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      run_id TEXT NOT NULL,
-      profile_id TEXT NOT NULL,
-      folder_path TEXT,
-      excel_path TEXT,
-      status TEXT NOT NULL,
-      started_at TEXT,
       ended_at TEXT,
-      error_code TEXT,
-      error_detail TEXT
+      rows_total INTEGER NOT NULL DEFAULT 0,
+      rows_completed INTEGER NOT NULL DEFAULT 0,
+      rows_failed INTEGER NOT NULL DEFAULT 0,
+      log_path TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS opened_sessions (
+    CREATE TABLE IF NOT EXISTS profile_row_executions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      run_id TEXT NOT NULL,
+      execution_id TEXT NOT NULL,
       profile_id TEXT NOT NULL,
+      excel_row_number INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      status_detail TEXT,
+      started_at TEXT NOT NULL,
+      ended_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS profile_browser_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      profile_id TEXT NOT NULL,
+      execution_id TEXT NOT NULL,
       remote_debugging_address TEXT NOT NULL,
       browser_location TEXT,
       driver_path TEXT,
-      created_at TEXT NOT NULL
+      session_status TEXT NOT NULL,
+      connected_at TEXT NOT NULL,
+      closed_at TEXT
     );
   `);
 
+  migrateProfileRuntimeConfig(db);
+
   return db;
+}
+
+function columnExists(db, tableName, columnName) {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  return columns.some((column) => column.name === columnName);
+}
+
+function migrateProfileRuntimeConfig(db) {
+  if (!columnExists(db, "profile_runtime_config", "field_delay_min_seconds")) {
+    db.exec(`ALTER TABLE profile_runtime_config ADD COLUMN field_delay_min_seconds REAL NOT NULL DEFAULT 1`);
+  }
+  if (!columnExists(db, "profile_runtime_config", "field_delay_max_seconds")) {
+    db.exec(`ALTER TABLE profile_runtime_config ADD COLUMN field_delay_max_seconds REAL NOT NULL DEFAULT 1`);
+  }
+  if (!columnExists(db, "profile_runtime_config", "row_interval_min_minutes")) {
+    db.exec(`ALTER TABLE profile_runtime_config ADD COLUMN row_interval_min_minutes REAL NOT NULL DEFAULT 1`);
+  }
+  if (!columnExists(db, "profile_runtime_config", "row_interval_max_minutes")) {
+    db.exec(`ALTER TABLE profile_runtime_config ADD COLUMN row_interval_max_minutes REAL NOT NULL DEFAULT 1`);
+  }
+
+  const hasLegacyFieldDelay = columnExists(db, "profile_runtime_config", "field_delay_seconds");
+  const hasLegacyRowInterval = columnExists(db, "profile_runtime_config", "row_interval_seconds");
+
+  if (hasLegacyFieldDelay) {
+    db.exec(`
+      UPDATE profile_runtime_config
+      SET field_delay_min_seconds = COALESCE(field_delay_min_seconds, field_delay_seconds, 1),
+          field_delay_max_seconds = COALESCE(field_delay_max_seconds, field_delay_seconds, 1)
+    `);
+  }
+
+  if (hasLegacyRowInterval) {
+    db.exec(`
+      UPDATE profile_runtime_config
+      SET row_interval_min_minutes = COALESCE(row_interval_min_minutes, row_interval_seconds, 1),
+          row_interval_max_minutes = COALESCE(row_interval_max_minutes, row_interval_seconds, 1)
+    `);
+  }
 }
 
 export function seedSystemConfig(db, config) {
@@ -106,6 +169,69 @@ export function getSystemConfig(db) {
   `).get();
 }
 
+export function updateSystemConfig(db, config) {
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO system_config (
+      id,
+      gpm_api_base_url,
+      excel_filename_standard,
+      log_dir,
+      artifacts_dir,
+      updated_at
+    )
+    VALUES (1, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      gpm_api_base_url = excluded.gpm_api_base_url,
+      excel_filename_standard = excluded.excel_filename_standard,
+      log_dir = excluded.log_dir,
+      artifacts_dir = excluded.artifacts_dir,
+      updated_at = excluded.updated_at
+  `).run(
+    config.gpmApiBaseUrl,
+    config.excelFilenameStandard,
+    config.logDir,
+    config.artifactsDir,
+    now
+  );
+}
+
+function ensureProfileDefaults(db, profileId, displayOrder) {
+  db.prepare(`
+    INSERT INTO profile_bindings (profile_id, enabled, folder_path, display_order)
+    VALUES (?, 0, NULL, ?)
+    ON CONFLICT(profile_id) DO NOTHING
+  `).run(profileId, displayOrder);
+
+  db.prepare(`
+    INSERT INTO profile_runtime_config (
+      profile_id,
+      field_delay_min_seconds,
+      field_delay_max_seconds,
+      row_interval_min_minutes,
+      row_interval_max_minutes
+    )
+    VALUES (?, 1, 1, 1, 1)
+    ON CONFLICT(profile_id) DO NOTHING
+  `).run(profileId);
+
+  db.prepare(`
+    INSERT INTO profile_runtime_state (
+      profile_id,
+      status,
+      active_execution_id,
+      current_row_number,
+      last_error_code,
+      last_error_detail,
+      last_run_status,
+      last_run_started_at,
+      last_run_ended_at
+    )
+    VALUES (?, 'idle', NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+    ON CONFLICT(profile_id) DO NOTHING
+  `).run(profileId);
+}
+
 export function upsertProfiles(db, profiles) {
   const now = new Date().toISOString();
   const upsertCache = db.prepare(`
@@ -127,11 +253,6 @@ export function upsertProfiles(db, profiles) {
       raw_payload = excluded.raw_payload,
       synced_at = excluded.synced_at
   `);
-  const ensureBinding = db.prepare(`
-    INSERT INTO profile_bindings (profile_id, enabled, folder_path, display_order, last_run_at, last_status)
-    VALUES (?, 0, NULL, ?, NULL, NULL)
-    ON CONFLICT(profile_id) DO NOTHING
-  `);
 
   db.exec("BEGIN");
   try {
@@ -145,7 +266,7 @@ export function upsertProfiles(db, profiles) {
         JSON.stringify(profile),
         now
       );
-      ensureBinding.run(profile.id, index + 1);
+      ensureProfileDefaults(db, profile.id, index + 1);
     });
     db.exec("COMMIT");
   } catch (error) {
@@ -165,28 +286,68 @@ export function listDashboardProfiles(db) {
       COALESCE(b.enabled, 0) AS enabled,
       COALESCE(b.display_order, 999999) AS display_order,
       b.folder_path,
-      b.last_run_at,
-      b.last_status
+      COALESCE(cfg.field_delay_min_seconds, 1) AS field_delay_min_seconds,
+      COALESCE(cfg.field_delay_max_seconds, 1) AS field_delay_max_seconds,
+      COALESCE(cfg.row_interval_min_minutes, 1) AS row_interval_min_minutes,
+      COALESCE(cfg.row_interval_max_minutes, 1) AS row_interval_max_minutes,
+      COALESCE(st.status, 'idle') AS runtime_status,
+      st.active_execution_id,
+      st.current_row_number,
+      st.last_error_code,
+      st.last_error_detail,
+      st.last_run_status,
+      st.last_run_started_at,
+      st.last_run_ended_at
     FROM gpm_profiles_cache c
     LEFT JOIN profile_bindings b ON b.profile_id = c.profile_id
+    LEFT JOIN profile_runtime_config cfg ON cfg.profile_id = c.profile_id
+    LEFT JOIN profile_runtime_state st ON st.profile_id = c.profile_id
     ORDER BY COALESCE(b.display_order, 999999), c.profile_name
   `).all();
 }
 
-export function updateProfileBinding(db, { profileId, enabled, folderPath, displayOrder }) {
-  const existing = db.prepare(`
-    SELECT profile_id, enabled, folder_path, display_order
-    FROM profile_bindings
-    WHERE profile_id = ?
+export function getProfileDashboardRow(db, profileId) {
+  return db.prepare(`
+    SELECT
+      c.profile_id,
+      c.profile_name,
+      c.group_id,
+      c.browser_type,
+      c.browser_version,
+      COALESCE(b.enabled, 0) AS enabled,
+      COALESCE(b.display_order, 999999) AS display_order,
+      b.folder_path,
+      COALESCE(cfg.field_delay_min_seconds, 1) AS field_delay_min_seconds,
+      COALESCE(cfg.field_delay_max_seconds, 1) AS field_delay_max_seconds,
+      COALESCE(cfg.row_interval_min_minutes, 1) AS row_interval_min_minutes,
+      COALESCE(cfg.row_interval_max_minutes, 1) AS row_interval_max_minutes,
+      COALESCE(st.status, 'idle') AS runtime_status,
+      st.active_execution_id,
+      st.current_row_number,
+      st.last_error_code,
+      st.last_error_detail,
+      st.last_run_status,
+      st.last_run_started_at,
+      st.last_run_ended_at
+    FROM gpm_profiles_cache c
+    LEFT JOIN profile_bindings b ON b.profile_id = c.profile_id
+    LEFT JOIN profile_runtime_config cfg ON cfg.profile_id = c.profile_id
+    LEFT JOIN profile_runtime_state st ON st.profile_id = c.profile_id
+    WHERE c.profile_id = ?
   `).get(profileId);
+}
 
-  if (!existing) {
-    db.prepare(`
-      INSERT INTO profile_bindings (profile_id, enabled, folder_path, display_order)
-      VALUES (?, ?, ?, ?)
-    `).run(profileId, enabled ? 1 : 0, folderPath || null, displayOrder || 0);
-    return;
-  }
+export function updateProfileSettings(db, {
+  profileId,
+  enabled,
+  folderPath,
+  displayOrder,
+  fieldDelayMinSeconds,
+  fieldDelayMaxSeconds,
+  rowIntervalMinMinutes,
+  rowIntervalMaxMinutes
+}) {
+  ensureProfileDefaults(db, profileId, displayOrder || 0);
 
   db.prepare(`
     UPDATE profile_bindings
@@ -197,171 +358,241 @@ export function updateProfileBinding(db, { profileId, enabled, folderPath, displ
   `).run(
     enabled ? 1 : 0,
     folderPath || null,
-    Number.isFinite(displayOrder) ? displayOrder : existing.display_order,
+    Number.isFinite(displayOrder) ? displayOrder : 0,
+    profileId
+  );
+
+  db.prepare(`
+    UPDATE profile_runtime_config
+    SET field_delay_min_seconds = ?,
+        field_delay_max_seconds = ?,
+        row_interval_min_minutes = ?,
+        row_interval_max_minutes = ?
+    WHERE profile_id = ?
+  `).run(
+    Number.isFinite(fieldDelayMinSeconds) ? fieldDelayMinSeconds : 1,
+    Number.isFinite(fieldDelayMaxSeconds) ? fieldDelayMaxSeconds : 1,
+    Number.isFinite(rowIntervalMinMinutes) ? rowIntervalMinMinutes : 1,
+    Number.isFinite(rowIntervalMaxMinutes) ? rowIntervalMaxMinutes : 1,
     profileId
   );
 }
 
-export function createRun(db, { runId, maxConcurrency }) {
-  const startedAt = new Date().toISOString();
+export function updateRuntimeState(db, {
+  profileId,
+  status,
+  activeExecutionId,
+  currentRowNumber,
+  lastErrorCode,
+  lastErrorDetail,
+  lastRunStatus,
+  lastRunStartedAt,
+  lastRunEndedAt
+}) {
+  ensureProfileDefaults(db, profileId, 0);
+  const current = db.prepare(`
+    SELECT *
+    FROM profile_runtime_state
+    WHERE profile_id = ?
+  `).get(profileId);
+
   db.prepare(`
-    INSERT INTO runs (run_id, status, max_concurrency, started_at)
-    VALUES (?, 'running', ?, ?)
-  `).run(runId, maxConcurrency, startedAt);
+    UPDATE profile_runtime_state
+    SET status = ?,
+        active_execution_id = ?,
+        current_row_number = ?,
+        last_error_code = ?,
+        last_error_detail = ?,
+        last_run_status = ?,
+        last_run_started_at = ?,
+        last_run_ended_at = ?
+    WHERE profile_id = ?
+  `).run(
+    status ?? current.status,
+    activeExecutionId === undefined ? current.active_execution_id : activeExecutionId,
+    currentRowNumber === undefined ? current.current_row_number : currentRowNumber,
+    lastErrorCode === undefined ? current.last_error_code : lastErrorCode,
+    lastErrorDetail === undefined ? current.last_error_detail : lastErrorDetail,
+    lastRunStatus === undefined ? current.last_run_status : lastRunStatus,
+    lastRunStartedAt === undefined ? current.last_run_started_at : lastRunStartedAt,
+    lastRunEndedAt === undefined ? current.last_run_ended_at : lastRunEndedAt,
+    profileId
+  );
 }
 
-export function finishRun(db, { runId, status }) {
+export function createProfileExecution(db, {
+  executionId,
+  profileId,
+  status,
+  startedAt,
+  logPath
+}) {
   db.prepare(`
-    UPDATE runs
-    SET status = ?, ended_at = ?
-    WHERE run_id = ?
-  `).run(status, new Date().toISOString(), runId);
-}
-
-export function setRunStopped(db, runId) {
-  db.prepare(`
-    UPDATE runs
-    SET status = 'stopped', ended_at = ?
-    WHERE run_id = ? AND status = 'running'
-  `).run(new Date().toISOString(), runId);
-}
-
-export function addRunItem(db, item) {
-  db.prepare(`
-    INSERT INTO run_items (
-      run_id,
+    INSERT INTO profile_executions (
+      execution_id,
       profile_id,
-      folder_path,
-      excel_path,
       status,
       started_at,
-      ended_at,
-      error_code,
-      error_detail
+      log_path
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    item.runId,
-    item.profileId,
-    item.folderPath || null,
-    item.excelPath || null,
-    item.status,
-    item.startedAt || null,
-    item.endedAt || null,
-    item.errorCode || null,
-    item.errorDetail || null
-  );
+    VALUES (?, ?, ?, ?, ?)
+  `).run(executionId, profileId, status, startedAt, logPath || null);
 }
 
-export function updateRunItem(db, item) {
+export function updateProfileExecution(db, {
+  executionId,
+  status,
+  endedAt,
+  rowsTotal,
+  rowsCompleted,
+  rowsFailed,
+  logPath
+}) {
+  const current = db.prepare(`
+    SELECT *
+    FROM profile_executions
+    WHERE execution_id = ?
+  `).get(executionId);
+
   db.prepare(`
-    UPDATE run_items
+    UPDATE profile_executions
     SET status = ?,
-        folder_path = ?,
-        excel_path = ?,
-        started_at = ?,
         ended_at = ?,
-        error_code = ?,
-        error_detail = ?
-    WHERE run_id = ? AND profile_id = ?
+        rows_total = ?,
+        rows_completed = ?,
+        rows_failed = ?,
+        log_path = ?
+    WHERE execution_id = ?
   `).run(
-    item.status,
-    item.folderPath || null,
-    item.excelPath || null,
-    item.startedAt || null,
-    item.endedAt || null,
-    item.errorCode || null,
-    item.errorDetail || null,
-    item.runId,
-    item.profileId
+    status ?? current.status,
+    endedAt === undefined ? current.ended_at : endedAt,
+    rowsTotal === undefined ? current.rows_total : rowsTotal,
+    rowsCompleted === undefined ? current.rows_completed : rowsCompleted,
+    rowsFailed === undefined ? current.rows_failed : rowsFailed,
+    logPath === undefined ? current.log_path : logPath,
+    executionId
   );
 }
 
-export function addOpenedSession(db, session) {
+export function recordProfileRowExecution(db, {
+  executionId,
+  profileId,
+  excelRowNumber,
+  status,
+  statusDetail,
+  startedAt,
+  endedAt
+}) {
   db.prepare(`
-    INSERT INTO opened_sessions (
-      run_id,
+    INSERT INTO profile_row_executions (
+      execution_id,
       profile_id,
+      excel_row_number,
+      status,
+      status_detail,
+      started_at,
+      ended_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    executionId,
+    profileId,
+    excelRowNumber,
+    status,
+    statusDetail || null,
+    startedAt,
+    endedAt
+  );
+}
+
+export function createProfileBrowserSession(db, {
+  profileId,
+  executionId,
+  remoteDebuggingAddress,
+  browserLocation,
+  driverPath,
+  sessionStatus,
+  connectedAt
+}) {
+  db.prepare(`
+    INSERT INTO profile_browser_sessions (
+      profile_id,
+      execution_id,
       remote_debugging_address,
       browser_location,
       driver_path,
-      created_at
+      session_status,
+      connected_at
     )
-    VALUES (?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `).run(
-    session.runId,
-    session.profileId,
-    session.remoteDebuggingAddress,
-    session.browserLocation || null,
-    session.driverPath || null,
-    new Date().toISOString()
+    profileId,
+    executionId,
+    remoteDebuggingAddress,
+    browserLocation || null,
+    driverPath || null,
+    sessionStatus,
+    connectedAt
   );
 }
 
-export function updateProfileRunState(db, { profileId, lastStatus }) {
+export function closeProfileBrowserSession(db, { executionId, sessionStatus, closedAt }) {
   db.prepare(`
-    UPDATE profile_bindings
-    SET last_run_at = ?, last_status = ?
-    WHERE profile_id = ?
-  `).run(new Date().toISOString(), lastStatus, profileId);
+    UPDATE profile_browser_sessions
+    SET session_status = ?,
+        closed_at = ?
+    WHERE execution_id = ?
+  `).run(sessionStatus, closedAt, executionId);
 }
 
-export function getRun(db, runId) {
-  const run = db.prepare(`
-    SELECT run_id, status, max_concurrency, started_at, ended_at
-    FROM runs
-    WHERE run_id = ?
-  `).get(runId);
+export function getProfileExecutions(db, profileId) {
+  return db.prepare(`
+    SELECT execution_id, profile_id, status, started_at, ended_at, rows_total, rows_completed, rows_failed, log_path
+    FROM profile_executions
+    WHERE profile_id = ?
+    ORDER BY started_at DESC
+  `).all(profileId);
+}
 
-  if (!run) {
+export function getProfileExecution(db, executionId) {
+  const execution = db.prepare(`
+    SELECT execution_id, profile_id, status, started_at, ended_at, rows_total, rows_completed, rows_failed, log_path
+    FROM profile_executions
+    WHERE execution_id = ?
+  `).get(executionId);
+
+  if (!execution) {
     return null;
   }
 
-  const items = db.prepare(`
-    SELECT run_id, profile_id, folder_path, excel_path, status, started_at, ended_at, error_code, error_detail
-    FROM run_items
-    WHERE run_id = ?
-    ORDER BY id
-  `).all(runId);
+  const rows = db.prepare(`
+    SELECT execution_id, profile_id, excel_row_number, status, status_detail, started_at, ended_at
+    FROM profile_row_executions
+    WHERE execution_id = ?
+    ORDER BY excel_row_number
+  `).all(executionId);
 
-  const sessions = db.prepare(`
-    SELECT run_id, profile_id, remote_debugging_address, browser_location, driver_path, created_at
-    FROM opened_sessions
-    WHERE run_id = ?
-    ORDER BY id
-  `).all(runId);
+  const session = db.prepare(`
+    SELECT profile_id, execution_id, remote_debugging_address, browser_location, driver_path, session_status, connected_at, closed_at
+    FROM profile_browser_sessions
+    WHERE execution_id = ?
+    ORDER BY id DESC
+    LIMIT 1
+  `).get(executionId);
 
   return {
-    ...run,
-    items,
-    sessions
+    ...execution,
+    rows,
+    session
   };
 }
 
-export function listRuns(db) {
+export function getActiveExecutionForProfile(db, profileId) {
   return db.prepare(`
-    SELECT run_id, status, max_concurrency, started_at, ended_at
-    FROM runs
+    SELECT execution_id, profile_id, status, started_at, ended_at, rows_total, rows_completed, rows_failed, log_path
+    FROM profile_executions
+    WHERE profile_id = ? AND status = 'running'
     ORDER BY started_at DESC
-  `).all();
-}
-
-export function listEnabledProfilesForRun(db) {
-  return db.prepare(`
-    SELECT
-      c.profile_id,
-      c.profile_name,
-      c.group_id,
-      c.browser_type,
-      c.browser_version,
-      b.enabled,
-      b.display_order,
-      b.folder_path,
-      b.last_run_at,
-      b.last_status
-    FROM gpm_profiles_cache c
-    INNER JOIN profile_bindings b ON b.profile_id = c.profile_id
-    WHERE b.enabled = 1
-    ORDER BY b.display_order, c.profile_name
-  `).all();
+    LIMIT 1
+  `).get(profileId);
 }

@@ -2,7 +2,7 @@ import path from "node:path";
 
 const rootDir = process.cwd();
 
-export function getConfig() {
+export function getDefaultConfig() {
   return {
     port: Number(process.env.PORT || 3000),
     gpmApiBaseUrl: process.env.GPM_API_BASE_URL || "http://127.0.0.1:19995",
@@ -14,3 +14,16 @@ export function getConfig() {
   };
 }
 
+export function mergeConfig(baseConfig, storedConfig = {}) {
+  return {
+    ...baseConfig,
+    gpmApiBaseUrl: storedConfig.gpm_api_base_url || storedConfig.gpmApiBaseUrl || baseConfig.gpmApiBaseUrl,
+    excelFilenameStandard: storedConfig.excel_filename_standard || storedConfig.excelFilenameStandard || baseConfig.excelFilenameStandard,
+    logDir: storedConfig.log_dir || storedConfig.logDir || baseConfig.logDir,
+    artifactsDir: storedConfig.artifacts_dir || storedConfig.artifactsDir || baseConfig.artifactsDir
+  };
+}
+
+export function getConfig() {
+  return getDefaultConfig();
+}

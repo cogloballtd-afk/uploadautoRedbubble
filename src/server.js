@@ -1,34 +1,58 @@
 import fs from "node:fs";
 import express from "express";
-import { getConfig } from "./config.js";
-import { createDatabase, seedSystemConfig } from "./db.js";
+import { getDefaultConfig, mergeConfig } from "./config.js";
+import { createDatabase, getSystemConfig, seedSystemConfig } from "./db.js";
 import { GpmClient } from "./gpmClient.js";
-import { renderDashboardPage, renderRunPage } from "./html.js";
+import { renderAdminSettingsPage, renderDashboardPage, renderProfilePage } from "./html.js";
 import { createAppService } from "./services.js";
 
-export function createServer({ config = getConfig(), gpmClient } = {}) {
+export function createServer({ config = getDefaultConfig(), gpmClient, browserClient } = {}) {
   fs.mkdirSync(config.dataDir, { recursive: true });
-  fs.mkdirSync(config.logDir, { recursive: true });
-  fs.mkdirSync(config.artifactsDir, { recursive: true });
 
   const db = createDatabase(config.dbPath);
-  seedSystemConfig(db, config);
+  const storedConfig = getSystemConfig(db);
+  const effectiveConfig = mergeConfig(config, storedConfig);
+  fs.mkdirSync(effectiveConfig.logDir, { recursive: true });
+  fs.mkdirSync(effectiveConfig.artifactsDir, { recursive: true });
+  if (!storedConfig) {
+    seedSystemConfig(db, effectiveConfig);
+  }
 
   const service = createAppService({
     db,
-    gpmClient: gpmClient || new GpmClient({ baseUrl: config.gpmApiBaseUrl }),
-    config
+    gpmClient: gpmClient || new GpmClient({ baseUrl: effectiveConfig.gpmApiBaseUrl }),
+    browserClient,
+    config: effectiveConfig
   });
 
   const app = express();
   app.use(express.urlencoded({ extended: false }));
   app.use(express.json());
 
-  app.get("/", (_req, res) => {
+  function applyDashboardFilters(profiles, query) {
+    const q = typeof query.q === "string" ? query.q.trim().toLowerCase() : "";
+    const view = query.view === "selected" ? "selected" : "all";
+
+    return profiles.filter((profile) => {
+      if (view === "selected" && !profile.enabled) {
+        return false;
+      }
+      if (!q) {
+        return true;
+      }
+      return profile.profile_name.toLowerCase().includes(q);
+    });
+  }
+
+  app.get("/", (req, res) => {
+    const profiles = applyDashboardFilters(service.getDashboardProfiles(), req.query);
     res.send(renderDashboardPage({
-      profiles: service.getDashboardProfiles(),
-      runs: service.getRunList(),
-      config
+      profiles,
+      config: effectiveConfig,
+      filters: {
+        q: typeof req.query.q === "string" ? req.query.q : "",
+        view: req.query.view === "selected" ? "selected" : "all"
+      }
     }));
   });
 
@@ -41,47 +65,80 @@ export function createServer({ config = getConfig(), gpmClient } = {}) {
     }
   });
 
-  app.post("/profiles/:profileId/binding", (req, res) => {
-    service.saveProfileBinding({
+  app.get("/admin/settings", (_req, res) => {
+    res.send(renderAdminSettingsPage({
+      settings: service.getAdminSettings()
+    }));
+  });
+
+  app.post("/admin/settings", (req, res) => {
+    service.saveAdminSettings({
+      gpmApiBaseUrl: req.body.gpmApiBaseUrl?.trim(),
+      excelFilenameStandard: req.body.excelFilenameStandard?.trim(),
+      logDir: req.body.logDir?.trim(),
+      artifactsDir: req.body.artifactsDir?.trim()
+    });
+    fs.mkdirSync(service.config.logDir, { recursive: true });
+    fs.mkdirSync(service.config.artifactsDir, { recursive: true });
+    res.redirect("/admin/settings");
+  });
+
+  app.post("/profiles/:profileId/settings", (req, res) => {
+    service.saveProfileSettings({
       profileId: req.params.profileId,
       enabled: req.body.enabled === "1",
       folderPath: req.body.folderPath?.trim(),
-      displayOrder: Number(req.body.displayOrder || 0)
+      displayOrder: Number(req.body.displayOrder || 0),
+      fieldDelayMinSeconds: Number(req.body.fieldDelayMinSeconds || 1),
+      fieldDelayMaxSeconds: Number(req.body.fieldDelayMaxSeconds || 1),
+      rowIntervalMinMinutes: Number(req.body.rowIntervalMinMinutes || 1),
+      rowIntervalMaxMinutes: Number(req.body.rowIntervalMaxMinutes || 1)
     });
     res.redirect("/");
   });
 
-  app.post("/runs", async (req, res, next) => {
+  app.post("/profiles/:profileId/run", async (req, res, next) => {
     try {
-      const { runId } = await service.startOpenProfilesRun(req.body.maxConcurrency);
-      res.redirect(`/runs/${encodeURIComponent(runId)}`);
+      const { executionId } = await service.startProfileRun(req.params.profileId);
+      res.redirect(`/profiles/${encodeURIComponent(req.params.profileId)}?executionId=${encodeURIComponent(executionId)}`);
     } catch (error) {
       next(error);
     }
   });
 
-  app.get("/runs/:runId", (req, res) => {
-    res.send(renderRunPage({
-      run: service.getRunStatus(req.params.runId)
+  app.post("/profiles/:profileId/pause", (req, res) => {
+    service.pauseProfileRun(req.params.profileId);
+    res.redirect(`/profiles/${encodeURIComponent(req.params.profileId)}`);
+  });
+
+  app.post("/profiles/:profileId/stop", (req, res) => {
+    service.stopProfileRun(req.params.profileId);
+    res.redirect(`/profiles/${encodeURIComponent(req.params.profileId)}`);
+  });
+
+  app.get("/profiles/:profileId", (req, res) => {
+    const detail = service.getProfileDetail(req.params.profileId);
+    const selectedExecution = typeof req.query.executionId === "string"
+      ? service.getExecution(req.query.executionId)
+      : detail?.activeExecution || null;
+    res.send(renderProfilePage({
+      detail,
+      selectedExecution
     }));
   });
 
-  app.post("/runs/:runId/stop", (req, res) => {
-    service.stopRun(req.params.runId);
-    res.redirect(`/runs/${encodeURIComponent(req.params.runId)}`);
+  app.get("/api/dashboard/profiles", (req, res) => {
+    const profiles = applyDashboardFilters(service.getDashboardProfiles(), req.query);
+    res.json(profiles);
   });
 
-  app.get("/api/dashboard/profiles", (_req, res) => {
-    res.json(service.getDashboardProfiles());
-  });
-
-  app.get("/api/runs/:runId", (req, res) => {
-    const run = service.getRunStatus(req.params.runId);
-    if (!run) {
-      res.status(404).json({ error: "Run not found" });
+  app.get("/api/profiles/:profileId", (req, res) => {
+    const detail = service.getProfileDetail(req.params.profileId);
+    if (!detail) {
+      res.status(404).json({ error: "Profile not found" });
       return;
     }
-    res.json(run);
+    res.json(detail);
   });
 
   app.use((error, _req, res, _next) => {
@@ -93,7 +150,7 @@ export function createServer({ config = getConfig(), gpmClient } = {}) {
     `);
   });
 
-  return { app, service, db, config };
+  return { app, service, db, config: effectiveConfig };
 }
 
 const isMainModule = process.argv[1] && import.meta.url === new URL(`file://${process.argv[1].replaceAll("\\", "/")}`).href;
@@ -104,4 +161,3 @@ if (isMainModule) {
     console.log(`Dashboard listening on http://localhost:${config.port}`);
   });
 }
-
