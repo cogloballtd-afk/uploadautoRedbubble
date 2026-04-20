@@ -189,6 +189,99 @@ test("dashboard profile API supports search and selected-only view with new sett
   }
 });
 
+test("profile page exposes delete action for execution history and endpoint removes it", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "gpm-server-delete-history-"));
+  const config = makeConfig(root);
+  const validFolder = path.join(root, "folder-delete");
+  fs.mkdirSync(validFolder, { recursive: true });
+  makeExcelFile(path.join(validFolder, "input.xlsx"), [
+    ["row 1", "C:\\file1.png", "", "", ""]
+  ]);
+
+  const gpmClient = {
+    listProfiles: async () => [
+      { id: "p1", name: "Alpha", group_id: "g1", browser_type: "chromium", browser_version: "119" }
+    ],
+    startProfile: async (profileId) => ({
+      profileId,
+      browserLocation: "C:\\browser.exe",
+      remoteDebuggingAddress: "127.0.0.1:9333",
+      driverPath: "C:\\driver.exe"
+    }),
+    closeProfile: async () => ({ success: true })
+  };
+
+  const browserClient = {
+    attachToSession: async () => ({
+      pageUrl: "https://example.test",
+      pageTitle: "Attached"
+    }),
+    processRow: async ({ row }) => ({
+      status: "ok",
+      statusDetail: `processed row ${row.rowNumber}`
+    }),
+    closeAttachment: async () => undefined,
+    captureErrorScreenshot: async () => null
+  };
+
+  const { app } = createServer({ config, gpmClient, browserClient });
+  const server = app.listen(0);
+  const address = server.address();
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  try {
+    await fetch(`${baseUrl}/sync`, { method: "POST", redirect: "manual" });
+
+    const saveForm = new URLSearchParams({
+      enabled: "1",
+      folderPath: validFolder,
+      displayOrder: "1",
+      fieldDelayMinSeconds: "0",
+      fieldDelayMaxSeconds: "0",
+      rowIntervalMinMinutes: "0",
+      rowIntervalMaxMinutes: "0"
+    });
+    await fetch(`${baseUrl}/profiles/p1/settings`, {
+      method: "POST",
+      body: saveForm,
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      redirect: "manual"
+    });
+
+    const runResponse = await fetch(`${baseUrl}/profiles/p1/run`, {
+      method: "POST",
+      redirect: "manual"
+    });
+    const location = runResponse.headers.get("location");
+    const executionId = new URL(`http://127.0.0.1${location}`).searchParams.get("executionId");
+    assert.ok(executionId);
+
+    await waitFor(async () => {
+      const profileResponse = await fetch(`${baseUrl}/api/profiles/p1`);
+      const detail = await profileResponse.json();
+      assert.equal(detail.executions[0].status, "completed");
+      return detail;
+    });
+
+    const profilePage = await fetch(`${baseUrl}/profiles/p1`);
+    const html = await profilePage.text();
+    assert.match(html, /Delete/);
+    assert.match(html, /executions\/.*\/delete/);
+
+    const deleteResponse = await fetch(`${baseUrl}/profiles/p1/executions/${encodeURIComponent(executionId)}/delete`, {
+      method: "POST",
+      redirect: "manual"
+    });
+    assert.equal(deleteResponse.status, 302);
+
+    const profileResponseAfterDelete = await fetch(`${baseUrl}/api/profiles/p1`);
+    const detailAfterDelete = await profileResponseAfterDelete.json();
+    assert.equal(detailAfterDelete.executions.length, 0);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test("admin settings persist to DB and override environment defaults on restart", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "gpm-admin-settings-"));
   const config = makeConfig(root);

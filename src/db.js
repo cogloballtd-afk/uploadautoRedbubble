@@ -587,6 +587,35 @@ export function getProfileExecution(db, executionId) {
   };
 }
 
+export function deleteProfileExecution(db, { profileId, executionId }) {
+  const execution = db.prepare(`
+    SELECT execution_id, profile_id, status
+    FROM profile_executions
+    WHERE execution_id = ?
+  `).get(executionId);
+
+  if (!execution || execution.profile_id !== profileId) {
+    return false;
+  }
+
+  db.prepare(`
+    DELETE FROM profile_row_executions
+    WHERE execution_id = ?
+  `).run(executionId);
+
+  db.prepare(`
+    DELETE FROM profile_browser_sessions
+    WHERE execution_id = ?
+  `).run(executionId);
+
+  db.prepare(`
+    DELETE FROM profile_executions
+    WHERE execution_id = ? AND profile_id = ?
+  `).run(executionId, profileId);
+
+  return true;
+}
+
 export function getActiveExecutionForProfile(db, profileId) {
   return db.prepare(`
     SELECT execution_id, profile_id, status, started_at, ended_at, rows_total, rows_completed, rows_failed, log_path

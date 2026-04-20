@@ -5,6 +5,7 @@ import {
   closeProfileBrowserSession,
   createProfileBrowserSession,
   createProfileExecution,
+  deleteProfileExecution,
   getActiveExecutionForProfile,
   getProfileDashboardRow,
   getProfileExecution,
@@ -131,6 +132,19 @@ export function createAppService({
 
   function getExecution(executionId) {
     return getProfileExecution(db, executionId);
+  }
+
+  function deleteExecution(profileId, executionId) {
+    const execution = getProfileExecution(db, executionId);
+    if (!execution || execution.profile_id !== profileId) {
+      return false;
+    }
+
+    if (activeExecutions.has(profileId) || execution.status === "running") {
+      return false;
+    }
+
+    return deleteProfileExecution(db, { profileId, executionId });
   }
 
   function getAdminSettings() {
@@ -531,6 +545,7 @@ export function createAppService({
     getDashboardProfiles,
     getProfileDetail,
     getExecution,
+    deleteExecution,
     saveAdminSettings,
     saveProfileSettings,
     startProfileRun,

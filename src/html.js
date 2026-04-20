@@ -355,6 +355,12 @@ export function renderProfilePage({ detail, selectedExecution }) {
       <td>${escapeHtml(execution.rows_total)}</td>
       <td>${escapeHtml(execution.started_at)}</td>
       <td>${escapeHtml(execution.ended_at || "-")}</td>
+      <td>
+        <form method="post" action="/profiles/${encodeURIComponent(detail.profile.profile_id)}/executions/${encodeURIComponent(execution.execution_id)}/delete" onsubmit="return ${execution.status === "running" ? "false" : `confirm('Delete this execution history?')`}">
+          <button type="submit" class="danger" ${execution.status === "running" ? "disabled title=\"Stop this execution before deleting history\"" : ""}>Delete</button>
+        </form>
+        ${execution.status === "running" ? `<div class="mini">In progress</div>` : ``}
+      </td>
     </tr>
   `).join("");
 
@@ -414,9 +420,10 @@ export function renderProfilePage({ detail, selectedExecution }) {
               <th>Rows Total</th>
               <th>Started</th>
               <th>Ended</th>
+              <th>Actions</th>
             </tr>
           </thead>
-          <tbody>${executionRows || `<tr><td colspan="7">No executions yet.</td></tr>`}</tbody>
+          <tbody>${executionRows || `<tr><td colspan="8">No executions yet.</td></tr>`}</tbody>
         </table>
       </div>
     </section>

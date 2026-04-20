@@ -116,6 +116,11 @@ export function createServer({ config = getDefaultConfig(), gpmClient, browserCl
     res.redirect(`/profiles/${encodeURIComponent(req.params.profileId)}`);
   });
 
+  app.post("/profiles/:profileId/executions/:executionId/delete", (req, res) => {
+    service.deleteExecution(req.params.profileId, req.params.executionId);
+    res.redirect(`/profiles/${encodeURIComponent(req.params.profileId)}`);
+  });
+
   app.get("/profiles/:profileId", (req, res) => {
     const detail = service.getProfileDetail(req.params.profileId);
     const selectedExecution = typeof req.query.executionId === "string"

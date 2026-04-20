@@ -281,3 +281,70 @@ test("saveProfileSettings normalizes min max ranges for delays", async () => {
   assert.equal(detail.profile.row_interval_min_minutes, 3);
   assert.equal(detail.profile.row_interval_max_minutes, 12);
 });
+
+test("deleteExecution removes stored execution history for a profile", async () => {
+  const root = makeTempDir();
+  const db = createDatabase(path.join(root, "app.sqlite"));
+  const folder = path.join(root, "profile-delete");
+  fs.mkdirSync(folder, { recursive: true });
+  const excelPath = path.join(folder, "input.xlsx");
+  makeExcelFile(excelPath, [
+    ["row 1", "C:\\file1.png", "", "", ""]
+  ]);
+
+  seedSystemConfig(db, {
+    gpmApiBaseUrl: "http://127.0.0.1:19995",
+    excelFilenameStandard: "input.xlsx",
+    logDir: path.join(root, "logs"),
+    artifactsDir: path.join(root, "artifacts")
+  });
+
+  upsertProfiles(db, [makeProfile("p4", "Delta")]);
+  const service = createAppService({
+    db,
+    config: { artifactsDir: path.join(root, "artifacts") },
+    gpmClient: {
+      startProfile: async (profileId) => ({
+        profileId,
+        browserLocation: "C:\\browser.exe",
+        remoteDebuggingAddress: "127.0.0.1:9555",
+        driverPath: "C:\\driver.exe"
+      }),
+      closeProfile: async () => ({ success: true })
+    },
+    browserClient: {
+      attachToSession: async () => ({
+        pageUrl: "https://example.test",
+        pageTitle: "Attached"
+      }),
+      processRow: async () => ({
+        status: "ok",
+        statusDetail: "done"
+      }),
+      closeAttachment: async () => undefined,
+      captureErrorScreenshot: async () => null
+    }
+  });
+
+  service.saveProfileSettings({
+    profileId: "p4",
+    enabled: true,
+    folderPath: folder,
+    displayOrder: 1,
+    fieldDelayMinSeconds: 0,
+    fieldDelayMaxSeconds: 0,
+    rowIntervalMinMinutes: 0,
+    rowIntervalMaxMinutes: 0
+  });
+
+  const { executionId } = await service.startProfileRun("p4");
+  await waitFor(() => {
+    const detail = service.getProfileDetail("p4");
+    assert.equal(detail.profile.last_run_status, "completed");
+    return detail;
+  });
+
+  assert.equal(service.deleteExecution("p4", executionId), true);
+  assert.equal(service.getExecution(executionId), null);
+  assert.equal(service.getProfileDetail("p4").executions.length, 0);
+});
