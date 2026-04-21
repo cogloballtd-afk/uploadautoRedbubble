@@ -50,14 +50,22 @@ export class PlaywrightBrowserClient {
     });
 
     for (const [field, value] of values) {
-      const fieldDelaySeconds = randomBetween(fieldDelayMinSeconds, fieldDelayMaxSeconds);
       logger.log("field_ready", {
         excel_row_number: row.rowNumber,
         field,
-        value_preview: String(value).slice(0, 120),
-        delay_seconds: fieldDelaySeconds
+        value_preview: String(value).slice(0, 120)
       });
-      await sleep(fieldDelaySeconds * 1000);
+
+      // Field delay is temporarily disabled so downstream automation can continue
+      // immediately on the same open profile/session. Keep the config plumbing in
+      // place so we can restore per-field pacing later if needed.
+      // const fieldDelaySeconds = randomBetween(fieldDelayMinSeconds, fieldDelayMaxSeconds);
+      // logger.log("field_delay_wait", {
+      //   excel_row_number: row.rowNumber,
+      //   field,
+      //   delay_seconds: fieldDelaySeconds
+      // });
+      // await sleep(fieldDelaySeconds * 1000);
     }
 
     logger.log("row_completed", {

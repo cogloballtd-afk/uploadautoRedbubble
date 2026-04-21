@@ -113,8 +113,8 @@ test("per-profile run endpoint starts execution and exposes profile detail", asy
     await waitFor(async () => {
       const profileResponse = await fetch(`${baseUrl}/api/profiles/p1`);
       const detail = await profileResponse.json();
-      assert.equal(detail.profile.last_run_status, "completed");
-      assert.equal(detail.executions[0].status, "completed");
+      assert.equal(detail.profile.last_run_status, "awaiting_automation");
+      assert.equal(detail.executions[0].status, "awaiting_automation");
       return detail;
     });
 
@@ -122,7 +122,7 @@ test("per-profile run endpoint starts execution and exposes profile detail", asy
     const html = await profilePage.text();
     assert.match(html, /Execution History/);
     assert.match(html, /Alpha/);
-    assert.match(html, /completed/);
+    assert.match(html, /awaiting_automation/);
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
@@ -259,7 +259,7 @@ test("profile page exposes delete action for execution history and endpoint remo
     await waitFor(async () => {
       const profileResponse = await fetch(`${baseUrl}/api/profiles/p1`);
       const detail = await profileResponse.json();
-      assert.equal(detail.executions[0].status, "completed");
+      assert.equal(detail.executions[0].status, "awaiting_automation");
       return detail;
     });
 

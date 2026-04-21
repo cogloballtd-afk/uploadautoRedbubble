@@ -196,13 +196,54 @@ export function createAppService({
   }
 
   async function startProfileRun(profileId) {
-    const profile = getProfileDashboardRow(db, profileId);
+    let profile = getProfileDashboardRow(db, profileId);
     if (!profile) {
       throw new Error(`Unknown profile: ${profileId}`);
     }
 
     if (activeExecutions.has(profileId)) {
       return { executionId: activeExecutions.get(profileId).executionId };
+    }
+
+    if (profile.runtime_status === "awaiting_automation") {
+      const latestExecution = getProfileExecutions(db, profileId)[0];
+      const execution = latestExecution
+        ? getProfileExecution(db, latestExecution.execution_id)
+        : null;
+
+      if (execution?.session?.session_status === "detached") {
+        const logger = createProfileLogger({
+          artifactsDir: config.artifactsDir,
+          profileId,
+          executionId: latestExecution.execution_id
+        });
+
+        logger.log("awaiting_automation_restart_requested");
+        await gpmClient.closeProfile(profileId)
+          .then(() => {
+            logger.log("awaiting_automation_profile_closed_for_restart");
+          })
+          .catch((error) => {
+            logger.log("awaiting_automation_profile_close_for_restart_failed", {
+              message: error.message
+            });
+          });
+
+        closeProfileBrowserSession(db, {
+          executionId: latestExecution.execution_id,
+          sessionStatus: "closed",
+          closedAt: new Date().toISOString()
+        });
+        updateRuntimeState(db, {
+          profileId,
+          status: "idle",
+          currentRowNumber: null,
+          lastErrorCode: null,
+          lastErrorDetail: null
+        });
+        logger.log("awaiting_automation_session_closed_for_restart");
+        profile = getProfileDashboardRow(db, profileId);
+      }
     }
 
     if (!["idle", "paused", "failed"].includes(profile.runtime_status)) {
@@ -220,18 +261,18 @@ export function createAppService({
     createProfileExecution(db, {
       executionId,
       profileId,
-      status: "running",
+      status: "opening_profile",
       startedAt,
       logPath: logger.logPath
     });
     updateRuntimeState(db, {
       profileId,
-      status: "starting",
+      status: "opening_profile",
       activeExecutionId: executionId,
       currentRowNumber: null,
       lastErrorCode: null,
       lastErrorDetail: null,
-      lastRunStatus: "running",
+      lastRunStatus: "opening_profile",
       lastRunStartedAt: startedAt,
       lastRunEndedAt: null
     });
@@ -271,7 +312,59 @@ export function createAppService({
   function stopProfileRun(profileId) {
     const control = activeExecutions.get(profileId);
     if (!control) {
-      return false;
+      const profile = getProfileDashboardRow(db, profileId);
+      if (!profile || profile.runtime_status !== "awaiting_automation") {
+        return false;
+      }
+
+      const latestExecution = getProfileExecutions(db, profileId)[0];
+      if (!latestExecution) {
+        return false;
+      }
+
+      const execution = getProfileExecution(db, latestExecution.execution_id);
+      if (!execution?.session || execution.session.session_status !== "detached") {
+        return false;
+      }
+
+      const logger = createProfileLogger({
+        artifactsDir: config.artifactsDir,
+        profileId,
+        executionId: latestExecution.execution_id
+      });
+
+      logger.log("awaiting_automation_stop_requested");
+      updateRuntimeState(db, {
+        profileId,
+        status: "stopping"
+      });
+
+      gpmClient.closeProfile(profileId)
+        .then(() => {
+          logger.log("awaiting_automation_profile_closed");
+        })
+        .catch((error) => {
+          logger.log("awaiting_automation_profile_close_failed", {
+            message: error.message
+          });
+        })
+        .finally(() => {
+          closeProfileBrowserSession(db, {
+            executionId: latestExecution.execution_id,
+            sessionStatus: "closed",
+            closedAt: new Date().toISOString()
+          });
+          updateRuntimeState(db, {
+            profileId,
+            status: "idle",
+            currentRowNumber: null,
+            lastErrorCode: null,
+            lastErrorDetail: null
+          });
+          logger.log("awaiting_automation_session_closed");
+        });
+
+      return true;
     }
     control.shouldStop = true;
     updateRuntimeState(db, {
@@ -307,11 +400,12 @@ export function createAppService({
     const excelPath = getExcelFilePath(profile.folder_path, systemConfig.excel_filename_standard);
     let session;
     let attachment;
+    let shouldKeepProfileOpen = false;
 
     try {
       updateRuntimeState(db, {
         profileId: control.profileId,
-        status: "running",
+        status: "opening_profile",
         lastRunStartedAt: startedAt
       });
 
@@ -342,6 +436,17 @@ export function createAppService({
         page_title: attachment.pageTitle
       });
 
+      // Excel remains in this route for now. We are only tagging the current phase
+      // explicitly so we can reorder "open profile -> automation -> Excel" later.
+      updateProfileExecution(db, {
+        executionId: control.executionId,
+        status: "reading_excel"
+      });
+      updateRuntimeState(db, {
+        profileId: control.profileId,
+        status: "reading_excel"
+      });
+
       const pendingRows = listPendingRows(excelPath);
       updateProfileExecution(db, {
         executionId: control.executionId,
@@ -351,6 +456,17 @@ export function createAppService({
       let rowsCompleted = 0;
       let rowsFailed = 0;
 
+      if (pendingRows.length > 0) {
+        updateProfileExecution(db, {
+          executionId: control.executionId,
+          status: "processing_rows"
+        });
+        updateRuntimeState(db, {
+          profileId: control.profileId,
+          status: "processing_rows"
+        });
+      }
+
       for (const row of pendingRows) {
         if (control.shouldPause || control.shouldStop) {
           break;
@@ -359,7 +475,7 @@ export function createAppService({
         const rowStartedAt = new Date().toISOString();
         updateRuntimeState(db, {
           profileId: control.profileId,
-          status: "running",
+          status: "processing_rows",
           currentRowNumber: row.rowNumber
         });
 
@@ -434,17 +550,20 @@ export function createAppService({
           });
         }
 
-        if (!control.shouldPause && !control.shouldStop) {
-          const rowIntervalMinutes = randomBetween(
-            Number(profile.row_interval_min_minutes || 0),
-            Number(profile.row_interval_max_minutes || 0)
-          );
-          logger.log("row_interval_wait", {
-            excel_row_number: row.rowNumber,
-            delay_minutes: rowIntervalMinutes
-          });
-          await sleep(rowIntervalMinutes * 60 * 1000);
-        }
+        // Row interval is temporarily disabled so the next automation step can run
+        // immediately after each processed row while the profile remains open.
+        // Keep the original pacing block here for future re-enable.
+        // if (!control.shouldPause && !control.shouldStop) {
+        //   const rowIntervalMinutes = randomBetween(
+        //     Number(profile.row_interval_min_minutes || 0),
+        //     Number(profile.row_interval_max_minutes || 0)
+        //   );
+        //   logger.log("row_interval_wait", {
+        //     excel_row_number: row.rowNumber,
+        //     delay_minutes: rowIntervalMinutes
+        //   });
+        //   await sleep(rowIntervalMinutes * 60 * 1000);
+        // }
       }
 
       const refreshedPendingRows = listPendingRows(excelPath);
@@ -467,11 +586,12 @@ export function createAppService({
           runtimeStatus: "idle"
         });
       } else if (refreshedPendingRows.length === 0) {
+        shouldKeepProfileOpen = true;
         await finalizeExecution({
           control,
           logger,
-          finalStatus: hasErrors ? "completed_with_errors" : "completed",
-          runtimeStatus: "idle"
+          finalStatus: hasErrors ? "awaiting_automation_with_errors" : "awaiting_automation",
+          runtimeStatus: "awaiting_automation"
         });
       } else {
         await finalizeExecution({
@@ -494,16 +614,53 @@ export function createAppService({
         lastErrorDetail: error.message
       });
     } finally {
+      logger.log("cleanup_started", {
+        keep_profile_open: shouldKeepProfileOpen,
+        has_attachment: Boolean(attachment),
+        has_session: Boolean(session)
+      });
+
       if (attachment) {
-        await browserClient.closeAttachment(attachment).catch(() => undefined);
+        if (shouldKeepProfileOpen) {
+          logger.log("cleanup_attachment_skipped", {
+            reason: "keep_profile_open"
+          });
+        } else {
+          logger.log("cleanup_attachment_closing");
+          await browserClient.closeAttachment(attachment)
+            .then(() => {
+              logger.log("cleanup_attachment_closed");
+            })
+            .catch((error) => {
+              logger.log("cleanup_attachment_close_failed", {
+                message: error.message
+              });
+            });
+        }
       }
 
       if (session) {
-        await gpmClient.closeProfile(control.profileId).catch(() => undefined);
+        if (!shouldKeepProfileOpen) {
+          logger.log("cleanup_profile_closing");
+          await gpmClient.closeProfile(control.profileId)
+            .then(() => {
+              logger.log("cleanup_profile_closed");
+            })
+            .catch((error) => {
+              logger.log("cleanup_profile_close_failed", {
+                message: error.message
+              });
+            });
+        } else {
+          logger.log("cleanup_profile_kept_open");
+        }
         closeProfileBrowserSession(db, {
           executionId: control.executionId,
-          sessionStatus: "closed",
+          sessionStatus: shouldKeepProfileOpen ? "detached" : "closed",
           closedAt: new Date().toISOString()
+        });
+        logger.log("cleanup_session_state_recorded", {
+          session_status: shouldKeepProfileOpen ? "detached" : "closed"
         });
       }
     }

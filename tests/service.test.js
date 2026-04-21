@@ -93,6 +93,7 @@ test("startProfileRun processes all pending Excel rows, updates status, and clos
   });
 
   upsertProfiles(db, [makeProfile("p1", "Alpha")]);
+  let closeProfileCalls = 0;
   const service = createAppService({
     db,
     config: { artifactsDir: path.join(root, "artifacts") },
@@ -103,7 +104,10 @@ test("startProfileRun processes all pending Excel rows, updates status, and clos
         remoteDebuggingAddress: "127.0.0.1:9333",
         driverPath: "C:\\driver.exe"
       }),
-      closeProfile: async () => ({ success: true })
+      closeProfile: async () => {
+        closeProfileCalls += 1;
+        return { success: true };
+      }
     },
     browserClient: {
       attachToSession: async () => ({
@@ -133,16 +137,17 @@ test("startProfileRun processes all pending Excel rows, updates status, and clos
   const { executionId } = await service.startProfileRun("p1");
   await waitFor(() => {
     const detail = service.getProfileDetail("p1");
-    assert.equal(detail.profile.runtime_status, "idle");
-    assert.equal(detail.profile.last_run_status, "completed");
+    assert.equal(detail.profile.runtime_status, "awaiting_automation");
+    assert.equal(detail.profile.last_run_status, "awaiting_automation");
     return detail;
   });
 
   const execution = service.getExecution(executionId);
-  assert.equal(execution.status, "completed");
+  assert.equal(execution.status, "awaiting_automation");
   assert.equal(execution.rows_completed, 2);
   assert.equal(execution.rows_failed, 0);
-  assert.equal(execution.session.session_status, "closed");
+  assert.equal(execution.session.session_status, "detached");
+  assert.equal(closeProfileCalls, 0);
 
   const rows = readSheetRows(excelPath);
   assert.equal(rows[0].status, "ok");
@@ -231,13 +236,13 @@ test("pauseProfileRun waits for the current row, then resumes from the next pend
   const resumed = await service.startProfileRun("p2");
   await waitFor(() => {
     const detail = service.getProfileDetail("p2");
-    assert.equal(detail.profile.runtime_status, "idle");
-    assert.equal(detail.profile.last_run_status, "completed");
+    assert.equal(detail.profile.runtime_status, "awaiting_automation");
+    assert.equal(detail.profile.last_run_status, "awaiting_automation");
     return detail;
   });
 
   const resumedExecution = service.getExecution(resumed.executionId);
-  assert.equal(resumedExecution.status, "completed");
+  assert.equal(resumedExecution.status, "awaiting_automation");
   assert.equal(resumedExecution.rows_completed, 1);
 
   rows = readSheetRows(excelPath);
@@ -340,11 +345,97 @@ test("deleteExecution removes stored execution history for a profile", async () 
   const { executionId } = await service.startProfileRun("p4");
   await waitFor(() => {
     const detail = service.getProfileDetail("p4");
-    assert.equal(detail.profile.last_run_status, "completed");
+    assert.equal(detail.profile.last_run_status, "awaiting_automation");
     return detail;
   });
 
   assert.equal(service.deleteExecution("p4", executionId), true);
   assert.equal(service.getExecution(executionId), null);
   assert.equal(service.getProfileDetail("p4").executions.length, 0);
+});
+
+test("awaiting_automation can be stopped and subsequent run starts a fresh execution", async () => {
+  const root = makeTempDir();
+  const db = createDatabase(path.join(root, "app.sqlite"));
+  const folder = path.join(root, "profile-awaiting");
+  fs.mkdirSync(folder, { recursive: true });
+  makeExcelFile(path.join(folder, "input.xlsx"), [
+    ["row 1", "C:\\file1.png", "", "", ""]
+  ]);
+
+  seedSystemConfig(db, {
+    gpmApiBaseUrl: "http://127.0.0.1:19995",
+    excelFilenameStandard: "input.xlsx",
+    logDir: path.join(root, "logs"),
+    artifactsDir: path.join(root, "artifacts")
+  });
+
+  upsertProfiles(db, [makeProfile("p5", "Epsilon")]);
+
+  let closeProfileCalls = 0;
+  const service = createAppService({
+    db,
+    config: { artifactsDir: path.join(root, "artifacts") },
+    gpmClient: {
+      startProfile: async (profileId) => ({
+        profileId,
+        browserLocation: "C:\\browser.exe",
+        remoteDebuggingAddress: "127.0.0.1:9666",
+        driverPath: "C:\\driver.exe"
+      }),
+      closeProfile: async () => {
+        closeProfileCalls += 1;
+        return { success: true };
+      }
+    },
+    browserClient: {
+      attachToSession: async () => ({
+        pageUrl: "https://example.test",
+        pageTitle: "Attached"
+      }),
+      processRow: async () => ({
+        status: "ok",
+        statusDetail: "done"
+      }),
+      closeAttachment: async () => undefined,
+      captureErrorScreenshot: async () => null
+    }
+  });
+
+  service.saveProfileSettings({
+    profileId: "p5",
+    enabled: true,
+    folderPath: folder,
+    displayOrder: 1,
+    fieldDelayMinSeconds: 0,
+    fieldDelayMaxSeconds: 0,
+    rowIntervalMinMinutes: 0,
+    rowIntervalMaxMinutes: 0
+  });
+
+  const { executionId } = await service.startProfileRun("p5");
+  await waitFor(() => {
+    const detail = service.getProfileDetail("p5");
+    assert.equal(detail.profile.runtime_status, "awaiting_automation");
+    return detail;
+  });
+
+  const rerun = await service.startProfileRun("p5");
+  assert.notEqual(rerun.executionId, executionId);
+  await waitFor(() => {
+    const detail = service.getProfileDetail("p5");
+    assert.equal(detail.profile.runtime_status, "awaiting_automation");
+    return detail;
+  });
+
+  assert.equal(service.stopProfileRun("p5"), true);
+  await waitFor(() => {
+    const detail = service.getProfileDetail("p5");
+    assert.equal(detail.profile.runtime_status, "idle");
+    return detail;
+  });
+
+  assert.equal(closeProfileCalls, 2);
+  assert.equal(service.getExecution(executionId).session.session_status, "closed");
+  assert.equal(service.getExecution(rerun.executionId).session.session_status, "closed");
 });

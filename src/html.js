@@ -455,7 +455,7 @@ export function renderProfilePage({ detail, selectedExecution }) {
   `;
 
   const script = `
-    if (${JSON.stringify(detail.profile.runtime_status)} !== "idle" && ${JSON.stringify(detail.profile.runtime_status)} !== "paused" && ${JSON.stringify(detail.profile.runtime_status)} !== "failed") {
+    if (${JSON.stringify(detail.profile.runtime_status)} !== "idle" && ${JSON.stringify(detail.profile.runtime_status)} !== "paused" && ${JSON.stringify(detail.profile.runtime_status)} !== "failed" && ${JSON.stringify(detail.profile.runtime_status)} !== "awaiting_automation") {
       setTimeout(() => window.location.reload(), 3000);
     }
   `;
