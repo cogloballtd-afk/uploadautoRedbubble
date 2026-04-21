@@ -57,12 +57,40 @@ export class PlaywrightBrowserClient {
         selector: "input[type=checkbox]"
       });
 
-      // Wait for checkbox to be visible and clickable
+      // Step 1: Find checkbox
+      logger.log("step_info", {
+        excel_row_number: row.rowNumber,
+        step: "finding_checkbox",
+        message: "Searching for checkbox with selector: input[type=checkbox]",
+        timestamp: new Date().toISOString()
+      });
+
       const checkboxSelector = "input[type=checkbox]";
       await attachment.page.waitForSelector(checkboxSelector, { state: "visible", timeout: 10000 });
       
-      // Click the checkbox
+      logger.log("step_info", {
+        excel_row_number: row.rowNumber,
+        step: "checkbox_found",
+        message: "Checkbox found and visible",
+        timestamp: new Date().toISOString()
+      });
+
+      // Step 2: Click checkbox
+      logger.log("step_info", {
+        excel_row_number: row.rowNumber,
+        step: "clicking_checkbox",
+        message: "Clicking on checkbox",
+        timestamp: new Date().toISOString()
+      });
+
       await attachment.page.click(checkboxSelector);
+      
+      logger.log("step_info", {
+        excel_row_number: row.rowNumber,
+        step: "checkbox_clicked",
+        message: "Checkbox clicked successfully",
+        timestamp: new Date().toISOString()
+      });
       
       // Small delay to ensure click is registered
       await sleep(500);
@@ -73,6 +101,13 @@ export class PlaywrightBrowserClient {
         selector: checkboxSelector
       });
     } catch (error) {
+      logger.log("step_error", {
+        excel_row_number: row.rowNumber,
+        step: "checkbox_operation_failed",
+        message: `Failed during checkbox operation: ${error.message}`,
+        timestamp: new Date().toISOString()
+      });
+
       logger.log("action_failed", {
         excel_row_number: row.rowNumber,
         action: "click_checkbox",
