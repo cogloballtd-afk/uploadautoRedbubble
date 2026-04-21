@@ -49,6 +49,53 @@ export class PlaywrightBrowserClient {
       page_url: attachment.page.url()
     });
 
+    // Click checkbox with selector input[type=checkbox]
+    try {
+      logger.log("action_start", {
+        excel_row_number: row.rowNumber,
+        action: "click_checkbox",
+        selector: "input[type=checkbox]"
+      });
+
+      // Wait for checkbox to be visible and clickable
+      const checkboxSelector = "input[type=checkbox]";
+      await attachment.page.waitForSelector(checkboxSelector, { state: "visible", timeout: 10000 });
+      
+      // Click the checkbox
+      await attachment.page.click(checkboxSelector);
+      
+      // Small delay to ensure click is registered
+      await sleep(500);
+
+      logger.log("action_completed", {
+        excel_row_number: row.rowNumber,
+        action: "click_checkbox",
+        selector: checkboxSelector
+      });
+    } catch (error) {
+      logger.log("action_failed", {
+        excel_row_number: row.rowNumber,
+        action: "click_checkbox",
+        selector: "input[type=checkbox]",
+        error: error.message
+      });
+      
+      // Capture error screenshot
+      const screenshotPath = await this.captureErrorScreenshot({
+        attachment,
+        artifactsDir,
+        profileId: row.profileId,
+        executionId: row.executionId,
+        rowNumber: row.rowNumber
+      });
+
+      return {
+        status: "error",
+        statusDetail: `Failed to click checkbox: ${error.message}`,
+        errorScreenshot: screenshotPath
+      };
+    }
+
     for (const [field, value] of values) {
       logger.log("field_ready", {
         excel_row_number: row.rowNumber,
@@ -74,7 +121,7 @@ export class PlaywrightBrowserClient {
 
     return {
       status: "ok",
-      statusDetail: `Processed ${values.length} field(s) on ${attachment.page.url() || "current page"}`
+      statusDetail: `Clicked checkbox and processed ${values.length} field(s) on ${attachment.page.url() || "current page"}`
     };
   }
 
