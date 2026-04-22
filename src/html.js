@@ -400,10 +400,37 @@ export function renderProfilePage({ detail, selectedExecution }) {
           <div class="pill">Current row: ${escapeHtml(detail.profile.current_row_number || "-")}</div>
           <div class="pill">Field delay: ${escapeHtml(detail.profile.field_delay_min_seconds)}s - ${escapeHtml(detail.profile.field_delay_max_seconds)}s</div>
           <div class="pill">Row interval: ${escapeHtml(detail.profile.row_interval_min_minutes)} - ${escapeHtml(detail.profile.row_interval_max_minutes)} min</div>
+          <div class="pill">Folder: <code>${escapeHtml(detail.profile.folder_path || "-")}</code></div>
+          ${(() => {
+            const ae = detail.activeExecution;
+            if (!ae) return "";
+            return `
+              <div class="pill">Rows total: ${escapeHtml(ae.rows_total)}</div>
+              <div class="pill">Rows ok: ${escapeHtml(ae.rows_completed)}</div>
+              <div class="pill">Rows failed: ${escapeHtml(ae.rows_failed)}</div>
+            `;
+          })()}
+          ${detail.profile.next_row_at ? `<div class="pill" id="next-row-countdown" data-next-row-at="${escapeHtml(detail.profile.next_row_at)}">Next row in: calculating…</div>` : ""}
         </div>
         <p class="mini">Started: ${escapeHtml(detail.profile.last_run_started_at || "-")}</p>
         <p class="mini">Ended: ${escapeHtml(detail.profile.last_run_ended_at || "-")}</p>
         <p class="mini">${escapeHtml(detail.profile.last_error_detail || "")}</p>
+        ${detail.profile.next_row_at ? `
+        <script>
+          (function() {
+            var el = document.getElementById('next-row-countdown');
+            if (!el) return;
+            var target = new Date(el.getAttribute('data-next-row-at')).getTime();
+            function tick() {
+              var ms = target - Date.now();
+              if (ms <= 0) { el.textContent = 'Next row starting…'; return; }
+              var s = Math.floor(ms/1000);
+              var m = Math.floor(s/60); s = s%60;
+              el.textContent = 'Next row in: ' + m + 'm ' + s + 's';
+            }
+            tick(); setInterval(tick, 1000);
+          })();
+        </script>` : ""}
       </div>
     </section>
 

@@ -247,7 +247,44 @@ export function createAppService({
     }
 
     if (!["idle", "paused", "failed"].includes(profile.runtime_status)) {
-      throw new Error(`Profile is already ${profile.runtime_status}`);
+      // The runtime state says we're mid-execution, but no in-memory control entry exists —
+      // the previous server process or the GPM browser was killed. Treat as orphan and reset.
+      if (!activeExecutions.has(profileId)) {
+        const latestExecution = getProfileExecutions(db, profileId)[0];
+        if (latestExecution) {
+          const orphanLogger = createProfileLogger({
+            artifactsDir: config.artifactsDir,
+            profileId,
+            executionId: latestExecution.execution_id
+          });
+          orphanLogger.log("orphan_state_reset", {
+            previous_runtime_status: profile.runtime_status,
+            previous_execution_status: latestExecution.status
+          });
+          updateProfileExecution(db, {
+            executionId: latestExecution.execution_id,
+            status: "failed",
+            endedAt: new Date().toISOString()
+          });
+          closeProfileBrowserSession(db, {
+            executionId: latestExecution.execution_id,
+            sessionStatus: "closed",
+            closedAt: new Date().toISOString()
+          });
+        }
+        await gpmClient.closeProfile(profileId).catch(() => {});
+        updateRuntimeState(db, {
+          profileId,
+          status: "idle",
+          activeExecutionId: null,
+          currentRowNumber: null,
+          lastErrorCode: null,
+          lastErrorDetail: null
+        });
+        profile = getProfileDashboardRow(db, profileId);
+      } else {
+        throw new Error(`Profile is already ${profile.runtime_status}`);
+      }
     }
 
     const executionId = crypto.randomUUID();
@@ -436,6 +473,41 @@ export function createAppService({
         page_title: attachment.pageTitle
       });
 
+      // Navigate straight to the first pending row's URL from the `color` column —
+      // never use a static fallback (e.g. /portfolio/images/new/edit) because that route 404s.
+      const initialPendingRows = listPendingRows(excelPath);
+      const firstRowUrl = initialPendingRows.find((r) => /^https?:\/\//i.test(String(r.values.color || "").trim()))?.values.color?.trim();
+
+      if (firstRowUrl) {
+        updateRuntimeState(db, {
+          profileId: control.profileId,
+          status: "passing_cloudflare"
+        });
+
+        await browserClient.navigateAndPassCloudflare({
+          attachment,
+          targetUrl: firstRowUrl,
+          logger,
+          onCloudflarePending: ({ targetUrl }) => {
+            updateRuntimeState(db, {
+              profileId: control.profileId,
+              status: "pending_cf",
+              lastErrorCode: "pending_cf",
+              lastErrorDetail: `Admin must click Cloudflare checkbox in the GPM browser at ${targetUrl}`
+            });
+          }
+        });
+
+        updateRuntimeState(db, {
+          profileId: control.profileId,
+          status: "reading_excel",
+          lastErrorCode: null,
+          lastErrorDetail: null
+        });
+      } else {
+        logger.log("cf_skipped_no_pending_rows", { reason: "no pending row with a valid http URL in the color column" });
+      }
+
       // Excel remains in this route for now. We are only tagging the current phase
       // explicitly so we can reorder "open profile -> automation -> Excel" later.
       updateProfileExecution(db, {
@@ -486,7 +558,8 @@ export function createAppService({
             fieldDelayMinSeconds: Number(profile.field_delay_min_seconds || 0),
             fieldDelayMaxSeconds: Number(profile.field_delay_max_seconds || 0),
             logger,
-            artifactsDir: logger.executionDir
+            artifactsDir: logger.executionDir,
+            folderPath: profile.folder_path
           });
 
           writeRowResult(excelPath, row.rowNumber, {
@@ -550,20 +623,23 @@ export function createAppService({
           });
         }
 
-        // Row interval is temporarily disabled so the next automation step can run
-        // immediately after each processed row while the profile remains open.
-        // Keep the original pacing block here for future re-enable.
-        // if (!control.shouldPause && !control.shouldStop) {
-        //   const rowIntervalMinutes = randomBetween(
-        //     Number(profile.row_interval_min_minutes || 0),
-        //     Number(profile.row_interval_max_minutes || 0)
-        //   );
-        //   logger.log("row_interval_wait", {
-        //     excel_row_number: row.rowNumber,
-        //     delay_minutes: rowIntervalMinutes
-        //   });
-        //   await sleep(rowIntervalMinutes * 60 * 1000);
-        // }
+        if (!control.shouldPause && !control.shouldStop) {
+          const rowIntervalMinutes = randomBetween(
+            Number(profile.row_interval_min_minutes || 0),
+            Number(profile.row_interval_max_minutes || 0)
+          );
+          if (rowIntervalMinutes > 0) {
+            const nextRowAt = new Date(Date.now() + rowIntervalMinutes * 60 * 1000).toISOString();
+            logger.log("row_interval_wait", {
+              excel_row_number: row.rowNumber,
+              delay_minutes: Number(rowIntervalMinutes.toFixed(2)),
+              next_row_at: nextRowAt
+            });
+            updateRuntimeState(db, { profileId: control.profileId, nextRowAt });
+            await sleep(rowIntervalMinutes * 60 * 1000);
+            updateRuntimeState(db, { profileId: control.profileId, nextRowAt: null });
+          }
+        }
       }
 
       const refreshedPendingRows = listPendingRows(excelPath);

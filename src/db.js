@@ -91,8 +91,15 @@ export function createDatabase(dbPath) {
   `);
 
   migrateProfileRuntimeConfig(db);
+  migrateProfileRuntimeState(db);
 
   return db;
+}
+
+function migrateProfileRuntimeState(db) {
+  if (!columnExists(db, "profile_runtime_state", "next_row_at")) {
+    db.exec(`ALTER TABLE profile_runtime_state ADD COLUMN next_row_at TEXT`);
+  }
 }
 
 function columnExists(db, tableName, columnName) {
@@ -297,7 +304,8 @@ export function listDashboardProfiles(db) {
       st.last_error_detail,
       st.last_run_status,
       st.last_run_started_at,
-      st.last_run_ended_at
+      st.last_run_ended_at,
+      st.next_row_at
     FROM gpm_profiles_cache c
     LEFT JOIN profile_bindings b ON b.profile_id = c.profile_id
     LEFT JOIN profile_runtime_config cfg ON cfg.profile_id = c.profile_id
@@ -328,7 +336,8 @@ export function getProfileDashboardRow(db, profileId) {
       st.last_error_detail,
       st.last_run_status,
       st.last_run_started_at,
-      st.last_run_ended_at
+      st.last_run_ended_at,
+      st.next_row_at
     FROM gpm_profiles_cache c
     LEFT JOIN profile_bindings b ON b.profile_id = c.profile_id
     LEFT JOIN profile_runtime_config cfg ON cfg.profile_id = c.profile_id
@@ -387,7 +396,8 @@ export function updateRuntimeState(db, {
   lastErrorDetail,
   lastRunStatus,
   lastRunStartedAt,
-  lastRunEndedAt
+  lastRunEndedAt,
+  nextRowAt
 }) {
   ensureProfileDefaults(db, profileId, 0);
   const current = db.prepare(`
@@ -405,7 +415,8 @@ export function updateRuntimeState(db, {
         last_error_detail = ?,
         last_run_status = ?,
         last_run_started_at = ?,
-        last_run_ended_at = ?
+        last_run_ended_at = ?,
+        next_row_at = ?
     WHERE profile_id = ?
   `).run(
     status ?? current.status,
@@ -416,6 +427,7 @@ export function updateRuntimeState(db, {
     lastRunStatus === undefined ? current.last_run_status : lastRunStatus,
     lastRunStartedAt === undefined ? current.last_run_started_at : lastRunStartedAt,
     lastRunEndedAt === undefined ? current.last_run_ended_at : lastRunEndedAt,
+    nextRowAt === undefined ? current.next_row_at : nextRowAt,
     profileId
   );
 }
