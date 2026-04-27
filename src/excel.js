@@ -120,3 +120,100 @@ export function getExcelFilePath(folderPath, excelFilenameStandard) {
   return path.join(folderPath, excelFilenameStandard);
 }
 
+export function readAllRows(excelPath) {
+  const workbookData = readWorkbook(excelPath);
+  ensureSystemColumns(workbookData);
+
+  const rows = [];
+  for (let rowIndex = 1; rowIndex < workbookData.rows.length; rowIndex += 1) {
+    const row = workbookData.rows[rowIndex];
+    if (!row || row.every((cell) => String(cell ?? "").trim() === "")) {
+      continue;
+    }
+    const values = {};
+    workbookData.headers.forEach((header, columnIndex) => {
+      values[header] = row[columnIndex] ?? "";
+    });
+    rows.push({
+      rowNumber: rowIndex + 1,
+      values
+    });
+  }
+
+  return {
+    headers: workbookData.headers,
+    rows
+  };
+}
+
+function persistWorkbook(workbookData, excelPath) {
+  const newSheet = XLSX.utils.aoa_to_sheet(workbookData.rows);
+  workbookData.workbook.Sheets[workbookData.sheetName] = newSheet;
+  XLSX.writeFile(workbookData.workbook, excelPath);
+}
+
+export function addRowValues(excelPath, values) {
+  const workbookData = readWorkbook(excelPath);
+  ensureSystemColumns(workbookData);
+
+  const newRow = workbookData.headers.map((header) => {
+    const value = values[header];
+    if (value === undefined || value === null) return "";
+    return value;
+  });
+
+  if (workbookData.headers.includes("TT")) {
+    const ttIndex = workbookData.headers.indexOf("TT");
+    if (newRow[ttIndex] === "" || newRow[ttIndex] === undefined) {
+      const dataRows = workbookData.rows.slice(1).filter((r) => r && r.some((c) => String(c ?? "").trim() !== ""));
+      newRow[ttIndex] = dataRows.length + 1;
+    }
+  }
+
+  workbookData.rows.push(newRow);
+  persistWorkbook(workbookData, excelPath);
+  return { rowNumber: workbookData.rows.length };
+}
+
+export function updateRowValues(excelPath, rowNumber, values) {
+  const workbookData = readWorkbook(excelPath);
+  ensureSystemColumns(workbookData);
+  const rowIndex = rowNumber - 1;
+  if (rowIndex < 1 || rowIndex >= workbookData.rows.length) {
+    throw new Error(`Row ${rowNumber} not found`);
+  }
+  const row = workbookData.rows[rowIndex] || [];
+  workbookData.headers.forEach((header, columnIndex) => {
+    if (Object.prototype.hasOwnProperty.call(values, header)) {
+      row[columnIndex] = values[header] ?? "";
+    } else if (row[columnIndex] === undefined) {
+      row[columnIndex] = "";
+    }
+  });
+  workbookData.rows[rowIndex] = row;
+  persistWorkbook(workbookData, excelPath);
+}
+
+export function deleteRowAt(excelPath, rowNumber) {
+  const workbookData = readWorkbook(excelPath);
+  ensureSystemColumns(workbookData);
+  const rowIndex = rowNumber - 1;
+  if (rowIndex < 1 || rowIndex >= workbookData.rows.length) {
+    throw new Error(`Row ${rowNumber} not found`);
+  }
+  workbookData.rows.splice(rowIndex, 1);
+
+  if (workbookData.headers.includes("TT")) {
+    const ttIndex = workbookData.headers.indexOf("TT");
+    let counter = 1;
+    for (let i = 1; i < workbookData.rows.length; i += 1) {
+      const r = workbookData.rows[i];
+      if (!r || r.every((c) => String(c ?? "").trim() === "")) continue;
+      r[ttIndex] = counter;
+      counter += 1;
+    }
+  }
+
+  persistWorkbook(workbookData, excelPath);
+}
+

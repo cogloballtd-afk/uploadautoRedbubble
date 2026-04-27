@@ -88,6 +88,23 @@ export function createDatabase(dbPath) {
       connected_at TEXT NOT NULL,
       closed_at TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS ai_config (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      active_provider TEXT,
+      openai_api_key TEXT,
+      openai_base_url TEXT,
+      openai_model TEXT,
+      openrouter_api_key TEXT,
+      openrouter_base_url TEXT,
+      openrouter_model TEXT,
+      claude_api_key TEXT,
+      claude_base_url TEXT,
+      claude_model TEXT,
+      temperature REAL NOT NULL DEFAULT 0.7,
+      max_tokens INTEGER NOT NULL DEFAULT 1024,
+      updated_at TEXT
+    );
   `);
 
   migrateProfileRuntimeConfig(db);
@@ -626,6 +643,94 @@ export function deleteProfileExecution(db, { profileId, executionId }) {
   `).run(executionId, profileId);
 
   return true;
+}
+
+export function getAiConfig(db) {
+  const row = db.prepare(`
+    SELECT
+      active_provider,
+      openai_api_key,
+      openai_base_url,
+      openai_model,
+      openrouter_api_key,
+      openrouter_base_url,
+      openrouter_model,
+      claude_api_key,
+      claude_base_url,
+      claude_model,
+      temperature,
+      max_tokens,
+      updated_at
+    FROM ai_config
+    WHERE id = 1
+  `).get();
+
+  return row || {
+    active_provider: null,
+    openai_api_key: null,
+    openai_base_url: null,
+    openai_model: null,
+    openrouter_api_key: null,
+    openrouter_base_url: null,
+    openrouter_model: null,
+    claude_api_key: null,
+    claude_base_url: null,
+    claude_model: null,
+    temperature: 0.7,
+    max_tokens: 1024,
+    updated_at: null
+  };
+}
+
+export function updateAiConfig(db, config) {
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO ai_config (
+      id,
+      active_provider,
+      openai_api_key,
+      openai_base_url,
+      openai_model,
+      openrouter_api_key,
+      openrouter_base_url,
+      openrouter_model,
+      claude_api_key,
+      claude_base_url,
+      claude_model,
+      temperature,
+      max_tokens,
+      updated_at
+    )
+    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      active_provider = excluded.active_provider,
+      openai_api_key = excluded.openai_api_key,
+      openai_base_url = excluded.openai_base_url,
+      openai_model = excluded.openai_model,
+      openrouter_api_key = excluded.openrouter_api_key,
+      openrouter_base_url = excluded.openrouter_base_url,
+      openrouter_model = excluded.openrouter_model,
+      claude_api_key = excluded.claude_api_key,
+      claude_base_url = excluded.claude_base_url,
+      claude_model = excluded.claude_model,
+      temperature = excluded.temperature,
+      max_tokens = excluded.max_tokens,
+      updated_at = excluded.updated_at
+  `).run(
+    config.active_provider || null,
+    config.openai_api_key || null,
+    config.openai_base_url || null,
+    config.openai_model || null,
+    config.openrouter_api_key || null,
+    config.openrouter_base_url || null,
+    config.openrouter_model || null,
+    config.claude_api_key || null,
+    config.claude_base_url || null,
+    config.claude_model || null,
+    Number.isFinite(config.temperature) ? config.temperature : 0.7,
+    Number.isFinite(config.max_tokens) ? config.max_tokens : 1024,
+    now
+  );
 }
 
 export function getActiveExecutionForProfile(db, profileId) {

@@ -7,19 +7,24 @@ import {
   createProfileExecution,
   deleteProfileExecution,
   getActiveExecutionForProfile,
+  getAiConfig,
   getProfileDashboardRow,
   getProfileExecution,
   getProfileExecutions,
   getSystemConfig,
   listDashboardProfiles,
   recordProfileRowExecution,
+  updateAiConfig,
   updateSystemConfig,
   updateProfileExecution,
   updateProfileSettings,
   updateRuntimeState,
   upsertProfiles
 } from "./db.js";
-import { getExcelFilePath, listPendingRows, validateExcelFile, writeRowResult } from "./excel.js";
+import { createAiClient, getProviderDefaults, SUPPORTED_PROVIDERS } from "./aiClient.js";
+import { generateRedbubbleContent } from "./aiContent.js";
+import { addRowValues, deleteRowAt, getExcelFilePath, listPendingRows, readAllRows, updateRowValues, validateExcelFile, writeRowResult } from "./excel.js";
+import { buildExcelTemplate, listImageFiles } from "./excelTemplate.js";
 import { PlaywrightBrowserClient } from "./browserAutomation.js";
 import { createProfileLogger } from "./profileLogger.js";
 
@@ -185,6 +190,125 @@ export function createAppService({
       rowIntervalMinMinutes: rowIntervalRange.min,
       rowIntervalMaxMinutes: rowIntervalRange.max
     });
+  }
+
+  function generateExcelTemplate(profileId) {
+    const profile = getProfileDashboardRow(db, profileId);
+    if (!profile) {
+      throw new Error(`Unknown profile: ${profileId}`);
+    }
+    if (!profile.folder_path) {
+      throw new Error("Profile has no folder configured.");
+    }
+    if (!fs.existsSync(profile.folder_path)) {
+      throw new Error(`Folder does not exist: ${profile.folder_path}`);
+    }
+
+    const systemConfig = getSystemConfig(db);
+    const excelPath = getExcelFilePath(profile.folder_path, systemConfig.excel_filename_standard);
+    const result = buildExcelTemplate({
+      folderPath: profile.folder_path,
+      excelPath
+    });
+
+    return {
+      excelPath: result.excelPath,
+      rowsAdded: result.rowsAdded
+    };
+  }
+
+  async function generateExcelTemplateWithAi(profileId, { force = false, delayMs = 500, fetchImpl } = {}) {
+    const template = generateExcelTemplate(profileId);
+    const aiSummary = await aiFillAllRows(profileId, { force, delayMs, fetchImpl });
+    return {
+      ...template,
+      aiSummary
+    };
+  }
+
+  function getTemplateProfiles() {
+    return listDashboardProfiles(db)
+      .map(normalizeStatus)
+      .filter((profile) => profile.enabled)
+      .map((profile) => {
+        const preview = previewExcelTemplate(profile.profile_id);
+        return {
+          profile_id: profile.profile_id,
+          profile_name: profile.profile_name,
+          folder_path: profile.folder_path,
+          enabled: profile.enabled,
+          imageCount: preview.imageCount,
+          excelExists: preview.excelExists,
+          excelPath: preview.excelPath || null
+        };
+      });
+  }
+
+  function previewExcelTemplate(profileId) {
+    const profile = getProfileDashboardRow(db, profileId);
+    if (!profile || !profile.folder_path || !fs.existsSync(profile.folder_path)) {
+      return { imageCount: 0, excelExists: false };
+    }
+    const systemConfig = getSystemConfig(db);
+    const excelPath = getExcelFilePath(profile.folder_path, systemConfig.excel_filename_standard);
+    let imageCount = 0;
+    try {
+      imageCount = listImageFiles(profile.folder_path).length;
+    } catch {
+      imageCount = 0;
+    }
+    return {
+      imageCount,
+      excelExists: fs.existsSync(excelPath),
+      excelPath
+    };
+  }
+
+  function getProfileExcelPath(profileId) {
+    const profile = getProfileDashboardRow(db, profileId);
+    if (!profile) {
+      throw new Error(`Unknown profile: ${profileId}`);
+    }
+    if (!profile.folder_path) {
+      throw new Error("Profile has no folder configured.");
+    }
+    const systemConfig = getSystemConfig(db);
+    return {
+      profile,
+      excelPath: getExcelFilePath(profile.folder_path, systemConfig.excel_filename_standard)
+    };
+  }
+
+  function getProfileExcelData(profileId) {
+    const profile = getProfileDashboardRow(db, profileId);
+    if (!profile) return { exists: false, headers: [], rows: [] };
+    if (!profile.folder_path) return { exists: false, headers: [], rows: [], reason: "no_folder" };
+    const systemConfig = getSystemConfig(db);
+    const excelPath = getExcelFilePath(profile.folder_path, systemConfig.excel_filename_standard);
+    if (!fs.existsSync(excelPath)) {
+      return { exists: false, headers: [], rows: [], reason: "no_excel", excelPath };
+    }
+    try {
+      const data = readAllRows(excelPath);
+      return { exists: true, headers: data.headers, rows: data.rows, excelPath };
+    } catch (error) {
+      return { exists: false, headers: [], rows: [], reason: "invalid_excel", error: error.message, excelPath };
+    }
+  }
+
+  function addProfileExcelRow(profileId, values) {
+    const { excelPath } = getProfileExcelPath(profileId);
+    return addRowValues(excelPath, values);
+  }
+
+  function updateProfileExcelRow(profileId, rowNumber, values) {
+    const { excelPath } = getProfileExcelPath(profileId);
+    updateRowValues(excelPath, rowNumber, values);
+  }
+
+  function deleteProfileExcelRow(profileId, rowNumber) {
+    const { excelPath } = getProfileExcelPath(profileId);
+    deleteRowAt(excelPath, rowNumber);
   }
 
   function saveAdminSettings(settings) {
@@ -783,6 +907,181 @@ export function createAppService({
     saveProfileSettings,
     startProfileRun,
     pauseProfileRun,
-    stopProfileRun
+    stopProfileRun,
+    generateExcelTemplate,
+    generateExcelTemplateWithAi,
+    previewExcelTemplate,
+    getTemplateProfiles,
+    getProfileExcelData,
+    addProfileExcelRow,
+    updateProfileExcelRow,
+    deleteProfileExcelRow,
+    getAiSettings,
+    saveAiSettings,
+    aiChat,
+    testAiConnection,
+    aiFillRow,
+    aiFillAllRows
   };
+
+  function rowNeedsAiFill(values) {
+    const missing = (key) => String(values?.[key] ?? "").trim() === "";
+    return missing("Main Tag") || missing("Supporting Tags") || missing("Description");
+  }
+
+  async function aiFillRow(profileId, rowNumber, { force = false, fetchImpl } = {}) {
+    const data = getProfileExcelData(profileId);
+    if (!data.exists) {
+      throw new Error("Excel template chưa tồn tại cho profile này.");
+    }
+    const target = data.rows.find((r) => r.rowNumber === Number(rowNumber));
+    if (!target) {
+      throw new Error(`Không tìm thấy dòng ${rowNumber} trong Excel.`);
+    }
+    const title = String(target.values.Title || "").trim();
+    if (!title) {
+      throw new Error(`Dòng ${rowNumber} chưa có Title — không thể sinh nội dung.`);
+    }
+    if (!force && !rowNeedsAiFill(target.values)) {
+      return { rowNumber: target.rowNumber, skipped: true, reason: "already_filled" };
+    }
+
+    const generated = await generateRedbubbleContent({
+      title,
+      aiChat: (input) => aiChat({ ...input, fetchImpl })
+    });
+
+    updateProfileExcelRow(profileId, target.rowNumber, {
+      "Main Tag": generated.mainTag,
+      "Supporting Tags": generated.supportingTags,
+      Description: generated.description
+    });
+
+    return {
+      rowNumber: target.rowNumber,
+      skipped: false,
+      mainTag: generated.mainTag,
+      supportingTags: generated.supportingTags,
+      description: generated.description,
+      model: generated.aiModel
+    };
+  }
+
+  async function aiFillAllRows(profileId, { force = false, delayMs = 500, fetchImpl } = {}) {
+    const data = getProfileExcelData(profileId);
+    if (!data.exists) {
+      throw new Error("Excel template chưa tồn tại cho profile này.");
+    }
+    const targets = data.rows.filter((r) => {
+      if (!String(r.values.Title || "").trim()) return false;
+      return force || rowNeedsAiFill(r.values);
+    });
+
+    const results = [];
+    for (let i = 0; i < targets.length; i += 1) {
+      const target = targets[i];
+      try {
+        const result = await aiFillRow(profileId, target.rowNumber, { force, fetchImpl });
+        results.push({ rowNumber: target.rowNumber, ok: true, ...result });
+      } catch (error) {
+        results.push({ rowNumber: target.rowNumber, ok: false, error: error.message });
+      }
+      if (i < targets.length - 1 && delayMs > 0) {
+        await sleep(delayMs);
+      }
+    }
+
+    const filled = results.filter((r) => r.ok && !r.skipped).length;
+    const skipped = results.filter((r) => r.ok && r.skipped).length;
+    const failed = results.filter((r) => !r.ok).length;
+    return { total: targets.length, filled, skipped, failed, results };
+  }
+
+  function getAiSettings() {
+    const row = getAiConfig(db);
+    const providers = SUPPORTED_PROVIDERS.map((provider) => {
+      const defaults = getProviderDefaults(provider);
+      const apiKey = row[`${provider}_api_key`] || "";
+      return {
+        provider,
+        label: defaults.label,
+        defaultBaseUrl: defaults.baseUrl,
+        defaultModel: defaults.model,
+        apiKey,
+        hasApiKey: Boolean(apiKey),
+        baseUrl: row[`${provider}_base_url`] || "",
+        model: row[`${provider}_model`] || ""
+      };
+    });
+    return {
+      activeProvider: row.active_provider,
+      temperature: row.temperature,
+      maxTokens: row.max_tokens,
+      updatedAt: row.updated_at,
+      providers
+    };
+  }
+
+  function saveAiSettings(input) {
+    const config = {
+      active_provider: SUPPORTED_PROVIDERS.includes(input.activeProvider) ? input.activeProvider : null,
+      openai_api_key: input.openai?.apiKey ?? null,
+      openai_base_url: input.openai?.baseUrl || null,
+      openai_model: input.openai?.model || null,
+      openrouter_api_key: input.openrouter?.apiKey ?? null,
+      openrouter_base_url: input.openrouter?.baseUrl || null,
+      openrouter_model: input.openrouter?.model || null,
+      claude_api_key: input.claude?.apiKey ?? null,
+      claude_base_url: input.claude?.baseUrl || null,
+      claude_model: input.claude?.model || null,
+      temperature: Number.isFinite(input.temperature) ? input.temperature : 0.7,
+      max_tokens: Number.isFinite(input.maxTokens) ? Math.round(input.maxTokens) : 1024
+    };
+    updateAiConfig(db, config);
+  }
+
+  function buildAiClientForProvider(provider, { fetchImpl } = {}) {
+    const settings = getAiSettings();
+    const targetProvider = provider || settings.activeProvider;
+    if (!targetProvider) {
+      throw new Error("AI provider chưa được chọn. Cấu hình ở Admin > AI Settings.");
+    }
+    const providerCfg = settings.providers.find((p) => p.provider === targetProvider);
+    if (!providerCfg) {
+      throw new Error(`Unknown AI provider: ${targetProvider}`);
+    }
+    if (!providerCfg.apiKey) {
+      throw new Error(`API key cho ${providerCfg.label} chưa được cấu hình.`);
+    }
+    return createAiClient({
+      provider: targetProvider,
+      apiKey: providerCfg.apiKey,
+      baseUrl: providerCfg.baseUrl || providerCfg.defaultBaseUrl,
+      model: providerCfg.model || providerCfg.defaultModel,
+      temperature: settings.temperature,
+      maxTokens: settings.maxTokens,
+      fetchImpl
+    });
+  }
+
+  async function aiChat({ provider, system, messages, model, temperature, maxTokens, fetchImpl } = {}) {
+    const client = buildAiClientForProvider(provider, { fetchImpl });
+    return client.chat({ system, messages, model, temperature, maxTokens });
+  }
+
+  async function testAiConnection({ provider, fetchImpl } = {}) {
+    const client = buildAiClientForProvider(provider, { fetchImpl });
+    const result = await client.chat({
+      system: "You are a connectivity probe. Respond with the single word: ok.",
+      messages: [{ role: "user", content: "ping" }],
+      maxTokens: 16
+    });
+    return {
+      ok: true,
+      provider: client.provider,
+      model: client.model,
+      content: result.content,
+      usage: result.usage
+    };
+  }
 }

@@ -118,7 +118,7 @@ test("per-profile run endpoint starts execution and exposes profile detail", asy
       return detail;
     });
 
-    const profilePage = await fetch(`${baseUrl}/profiles/p1`);
+    const profilePage = await fetch(`${baseUrl}/profiles/p1?tab=execution`);
     const html = await profilePage.text();
     assert.match(html, /Execution History/);
     assert.match(html, /Alpha/);
@@ -263,7 +263,7 @@ test("profile page exposes delete action for execution history and endpoint remo
       return detail;
     });
 
-    const profilePage = await fetch(`${baseUrl}/profiles/p1`);
+    const profilePage = await fetch(`${baseUrl}/profiles/p1?tab=execution`);
     const html = await profilePage.text();
     assert.match(html, /Delete/);
     assert.match(html, /executions\/.*\/delete/);
@@ -341,4 +341,158 @@ test("admin settings persist to DB and override environment defaults on restart"
   assert.equal(restarted.config.excelFilenameStandard, "stored.xlsx");
   assert.equal(restarted.config.logDir, path.join(root, "stored-logs"));
   assert.equal(restarted.config.artifactsDir, path.join(root, "stored-artifacts"));
+});
+
+test("template tab exposes per-row and bulk AI fill actions", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "gpm-server-ai-template-"));
+  const config = makeConfig(root);
+  const validFolder = path.join(root, "folder-ai");
+  fs.mkdirSync(validFolder, { recursive: true });
+
+  const workbook = XLSX.utils.book_new();
+  const rows = [
+    ["TT", "Title", "Main Tag", "Supporting Tags", "Description", "Image path", "color", "status", "status_detail", "executed_at"],
+    [1, "Cute Frog Birthday", "", "", "", "C:\\frog.png", "", "", "", ""]
+  ];
+  const sheet = XLSX.utils.aoa_to_sheet(rows);
+  XLSX.utils.book_append_sheet(workbook, sheet, "Sheet1");
+  XLSX.writeFile(workbook, path.join(validFolder, "input.xlsx"));
+
+  const gpmClient = {
+    listProfiles: async () => [
+      { id: "p1", name: "Alpha", group_id: "g1", browser_type: "chromium", browser_version: "119" }
+    ]
+  };
+
+  const { app } = createServer({ config, gpmClient, browserClient: {} });
+  const server = app.listen(0);
+  const address = server.address();
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  try {
+    await fetch(`${baseUrl}/sync`, { method: "POST", redirect: "manual" });
+
+    const saveForm = new URLSearchParams({
+      enabled: "1",
+      folderPath: validFolder,
+      displayOrder: "1",
+      fieldDelayMinSeconds: "0",
+      fieldDelayMaxSeconds: "0",
+      rowIntervalMinMinutes: "0",
+      rowIntervalMaxMinutes: "0"
+    });
+    await fetch(`${baseUrl}/profiles/p1/settings`, {
+      method: "POST",
+      body: saveForm,
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      redirect: "manual"
+    });
+
+    const pageResponse = await fetch(`${baseUrl}/profiles/p1?tab=template`);
+    const html = await pageResponse.text();
+    assert.match(html, /\/profiles\/p1\/excel\/ai-fill-all/);
+    assert.match(html, /\/profiles\/p1\/excel\/rows\/2\/ai-fill/);
+    assert.match(html, />AI</);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("generate-excel route creates template and auto-fills C D E", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "gpm-server-generate-ai-"));
+  const config = makeConfig(root);
+  const validFolder = path.join(root, "folder-auto-ai");
+  fs.mkdirSync(validFolder, { recursive: true });
+  fs.writeFileSync(path.join(validFolder, "ghost party.png"), "");
+
+  const gpmClient = {
+    listProfiles: async () => [
+      { id: "p1", name: "Alpha", group_id: "g1", browser_type: "chromium", browser_version: "119" }
+    ]
+  };
+
+  const { app } = createServer({ config, gpmClient, browserClient: {} });
+  const server = app.listen(0);
+  const address = server.address();
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    if (typeof url === "string" && url === "https://api.test/v1/chat/completions") {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => "",
+        json: async () => ({
+          model: "gpt-4o-mini",
+          choices: [
+            {
+              message: {
+                content: '{"mainTag":"ghost party","supportingTags":"ghost art, halloween party","description":"Ghost party design."}'
+              }
+            }
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
+        })
+      };
+    }
+    return originalFetch(url, options);
+  };
+
+  try {
+    await fetch(`${baseUrl}/sync`, { method: "POST", redirect: "manual" });
+
+    const saveSettings = new URLSearchParams({
+      activeProvider: "openai",
+      temperature: "0.2",
+      maxTokens: "256",
+      openai_api_key: "sk-test",
+      openai_base_url: "https://api.test/v1",
+      openai_model: "gpt-4o-mini",
+      openrouter_api_key: "",
+      openrouter_base_url: "",
+      openrouter_model: "",
+      claude_api_key: "",
+      claude_base_url: "",
+      claude_model: ""
+    });
+    await fetch(`${baseUrl}/admin/ai-settings`, {
+      method: "POST",
+      body: saveSettings,
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      redirect: "manual"
+    });
+
+    const saveProfile = new URLSearchParams({
+      enabled: "1",
+      folderPath: validFolder,
+      displayOrder: "1",
+      fieldDelayMinSeconds: "0",
+      fieldDelayMaxSeconds: "0",
+      rowIntervalMinMinutes: "0",
+      rowIntervalMaxMinutes: "0"
+    });
+    await fetch(`${baseUrl}/profiles/p1/settings`, {
+      method: "POST",
+      body: saveProfile,
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      redirect: "manual"
+    });
+
+    const response = await fetch(`${baseUrl}/profiles/p1/generate-excel?return=profile`, {
+      method: "POST",
+      redirect: "manual"
+    });
+    assert.equal(response.status, 302);
+
+    const workbook = XLSX.readFile(path.join(validFolder, "input.xlsx"));
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+    assert.equal(rows[0]["Main Tag"], "ghost party");
+    assert.equal(rows[0]["Supporting Tags"], "ghost art, halloween party");
+    assert.equal(rows[0]["Description"], "Ghost party design.");
+  } finally {
+    globalThis.fetch = originalFetch;
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
 });

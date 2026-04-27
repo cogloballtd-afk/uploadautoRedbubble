@@ -19,6 +19,7 @@ function randomBetween(min, max) {
   return normalizedMin + (Math.random() * (normalizedMax - normalizedMin));
 }
 
+
 function sanitizeFilePart(value) {
   return String(value).replace(/[^a-zA-Z0-9_-]+/g, "_");
 }

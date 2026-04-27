@@ -3,7 +3,7 @@ import express from "express";
 import { getDefaultConfig, mergeConfig } from "./config.js";
 import { createDatabase, getSystemConfig, seedSystemConfig } from "./db.js";
 import { GpmClient } from "./gpmClient.js";
-import { renderAdminSettingsPage, renderDashboardPage, renderProfilePage } from "./html.js";
+import { renderAdminSettingsPage, renderAiSettingsPage, renderDashboardPage, renderProfilePage, renderTemplatesPage } from "./html.js";
 import { createAppService } from "./services.js";
 
 export function createServer({ config = getDefaultConfig(), gpmClient, browserClient } = {}) {
@@ -83,6 +83,67 @@ export function createServer({ config = getDefaultConfig(), gpmClient, browserCl
     res.redirect("/admin/settings");
   });
 
+  app.get("/admin/ai-settings", (req, res) => {
+    const flash = typeof req.query.msg === "string" ? { type: "info", message: req.query.msg } : null;
+    const testResult = typeof req.query.test === "string" ? safeJsonParse(req.query.test) : null;
+    res.send(renderAiSettingsPage({
+      settings: service.getAiSettings(),
+      flash,
+      testResult
+    }));
+  });
+
+  app.post("/admin/ai-settings", (req, res) => {
+    const body = req.body || {};
+    service.saveAiSettings({
+      activeProvider: typeof body.activeProvider === "string" ? body.activeProvider.trim() : null,
+      temperature: Number(body.temperature),
+      maxTokens: Number(body.maxTokens),
+      openai: {
+        apiKey: typeof body.openai_api_key === "string" ? body.openai_api_key.trim() : "",
+        baseUrl: typeof body.openai_base_url === "string" ? body.openai_base_url.trim() : "",
+        model: typeof body.openai_model === "string" ? body.openai_model.trim() : ""
+      },
+      openrouter: {
+        apiKey: typeof body.openrouter_api_key === "string" ? body.openrouter_api_key.trim() : "",
+        baseUrl: typeof body.openrouter_base_url === "string" ? body.openrouter_base_url.trim() : "",
+        model: typeof body.openrouter_model === "string" ? body.openrouter_model.trim() : ""
+      },
+      claude: {
+        apiKey: typeof body.claude_api_key === "string" ? body.claude_api_key.trim() : "",
+        baseUrl: typeof body.claude_base_url === "string" ? body.claude_base_url.trim() : "",
+        model: typeof body.claude_model === "string" ? body.claude_model.trim() : ""
+      }
+    });
+    res.redirect("/admin/ai-settings?msg=" + encodeURIComponent("Đã lưu AI settings"));
+  });
+
+  app.post("/admin/ai-test", async (req, res) => {
+    const provider = typeof req.body?.provider === "string" ? req.body.provider.trim() : null;
+    try {
+      const result = await service.testAiConnection({ provider });
+      const payload = JSON.stringify({
+        ok: true,
+        provider: result.provider,
+        model: result.model,
+        content: result.content,
+        usage: result.usage
+      });
+      res.redirect("/admin/ai-settings?test=" + encodeURIComponent(payload));
+    } catch (error) {
+      const payload = JSON.stringify({ ok: false, message: error.message });
+      res.redirect("/admin/ai-settings?test=" + encodeURIComponent(payload));
+    }
+  });
+
+  function safeJsonParse(value) {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+
   app.post("/profiles/:profileId/settings", (req, res) => {
     service.saveProfileSettings({
       profileId: req.params.profileId,
@@ -116,6 +177,124 @@ export function createServer({ config = getDefaultConfig(), gpmClient, browserCl
     res.redirect(`/profiles/${encodeURIComponent(req.params.profileId)}`);
   });
 
+  app.get("/templates", (_req, res) => {
+    const profiles = service.getTemplateProfiles();
+    const flash = typeof _req.query.generated === "string"
+      ? {
+          type: "generated",
+          profileId: typeof _req.query.profileId === "string" ? _req.query.profileId : "",
+          count: Number(_req.query.generated),
+          aiFilled: typeof _req.query.aiFilled === "string" ? Number(_req.query.aiFilled) : null,
+          aiTotal: typeof _req.query.aiTotal === "string" ? Number(_req.query.aiTotal) : null,
+          aiFailed: typeof _req.query.aiFailed === "string" ? Number(_req.query.aiFailed) : null,
+          aiSkipped: typeof _req.query.aiSkipped === "string" ? Number(_req.query.aiSkipped) : null
+        }
+      : typeof _req.query.error === "string"
+        ? { type: "error", message: _req.query.error }
+        : null;
+    res.send(renderTemplatesPage({ profiles, flash }));
+  });
+
+  app.post("/profiles/:profileId/generate-excel", async (req, res) => {
+    const returnTo = req.query.return === "profile" ? "profile" : "templates";
+    try {
+      const result = await service.generateExcelTemplateWithAi(req.params.profileId);
+      if (returnTo === "profile") {
+        res.redirect(`/profiles/${encodeURIComponent(req.params.profileId)}?tab=template&msg=${encodeURIComponent(`Đã tạo input.xlsx với ${result.rowsAdded} dòng`)}`);
+      } else {
+        res.redirect(`/templates?generated=${encodeURIComponent(result.rowsAdded)}&profileId=${encodeURIComponent(req.params.profileId)}`);
+      }
+    } catch (error) {
+      if (returnTo === "profile") {
+        res.redirect(`/profiles/${encodeURIComponent(req.params.profileId)}?tab=template&msg=${encodeURIComponent(`Lỗi: ${error.message}`)}`);
+      } else {
+        res.redirect(`/templates?error=${encodeURIComponent(error.message)}`);
+      }
+    }
+  });
+
+  function extractRowValuesFromBody(body, headers) {
+    const values = {};
+    for (const header of headers) {
+      const fieldName = `cell_${header}`;
+      if (Object.prototype.hasOwnProperty.call(body, fieldName)) {
+        values[header] = typeof body[fieldName] === "string" ? body[fieldName] : "";
+      }
+    }
+    return values;
+  }
+
+  function redirectTemplate(res, profileId, message = null) {
+    const base = `/profiles/${encodeURIComponent(profileId)}?tab=template`;
+    res.redirect(message ? `${base}&msg=${encodeURIComponent(message)}` : base);
+  }
+
+  app.post("/profiles/:profileId/excel/rows", (req, res, next) => {
+    try {
+      const data = service.getProfileExcelData(req.params.profileId);
+      if (!data.exists) {
+        return redirectTemplate(res, req.params.profileId, "Excel chưa tồn tại. Vào menu Tạo Template để sinh file.");
+      }
+      const values = extractRowValuesFromBody(req.body, data.headers);
+      service.addProfileExcelRow(req.params.profileId, values);
+      redirectTemplate(res, req.params.profileId, "Đã thêm dòng mới");
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/profiles/:profileId/excel/rows/:rowNumber/update", (req, res, next) => {
+    try {
+      const rowNumber = Number(req.params.rowNumber);
+      const data = service.getProfileExcelData(req.params.profileId);
+      if (!data.exists) {
+        return redirectTemplate(res, req.params.profileId, "Excel không tồn tại");
+      }
+      const values = extractRowValuesFromBody(req.body, data.headers);
+      service.updateProfileExcelRow(req.params.profileId, rowNumber, values);
+      redirectTemplate(res, req.params.profileId, `Đã cập nhật dòng ${rowNumber}`);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/profiles/:profileId/excel/rows/:rowNumber/ai-fill", async (req, res) => {
+    const profileId = req.params.profileId;
+    const rowNumber = Number(req.params.rowNumber);
+    const force = req.body?.force === "1" || req.query.force === "1";
+    try {
+      const result = await service.aiFillRow(profileId, rowNumber, { force });
+      const msg = result.skipped
+        ? `Bỏ qua dòng ${rowNumber} (đã có nội dung)`
+        : `AI đã điền dòng ${rowNumber}`;
+      redirectTemplate(res, profileId, msg);
+    } catch (error) {
+      redirectTemplate(res, profileId, `Lỗi AI dòng ${rowNumber}: ${error.message}`);
+    }
+  });
+
+  app.post("/profiles/:profileId/excel/ai-fill-all", async (req, res) => {
+    const profileId = req.params.profileId;
+    const force = req.body?.force === "1";
+    try {
+      const summary = await service.aiFillAllRows(profileId, { force });
+      const msg = `AI fill xong: ${summary.filled}/${summary.total} thành công, ${summary.failed} lỗi, ${summary.skipped} bỏ qua`;
+      redirectTemplate(res, profileId, msg);
+    } catch (error) {
+      redirectTemplate(res, profileId, `Lỗi AI fill all: ${error.message}`);
+    }
+  });
+
+  app.post("/profiles/:profileId/excel/rows/:rowNumber/delete", (req, res, next) => {
+    try {
+      const rowNumber = Number(req.params.rowNumber);
+      service.deleteProfileExcelRow(req.params.profileId, rowNumber);
+      redirectTemplate(res, req.params.profileId, `Đã xóa dòng ${rowNumber}`);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.post("/profiles/:profileId/executions/:executionId/delete", (req, res) => {
     service.deleteExecution(req.params.profileId, req.params.executionId);
     res.redirect(`/profiles/${encodeURIComponent(req.params.profileId)}`);
@@ -126,9 +305,15 @@ export function createServer({ config = getDefaultConfig(), gpmClient, browserCl
     const selectedExecution = typeof req.query.executionId === "string"
       ? service.getExecution(req.query.executionId)
       : detail?.activeExecution || null;
+    const tab = ["general", "template", "execution"].includes(req.query.tab) ? req.query.tab : "general";
+    const message = typeof req.query.msg === "string" ? req.query.msg : null;
+    const excelData = tab === "template" ? service.getProfileExcelData(req.params.profileId) : null;
     res.send(renderProfilePage({
       detail,
-      selectedExecution
+      selectedExecution,
+      tab,
+      message,
+      excelData
     }));
   });
 
