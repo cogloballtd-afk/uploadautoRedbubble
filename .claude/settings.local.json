@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(node --test tests/excelTemplate.test.js)"
+      "Bash(node --test tests/excelTemplate.test.js)",
+      "Bash(curl -s -o /tmp/stats.html -w \"%{http_code}\\\\n\" http://localhost:3000/stats)",
+      "Read(//tmp/**)"
     ]
   }
 }

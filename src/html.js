@@ -231,6 +231,7 @@ export function renderDashboardPage({ profiles, config, filters }) {
             <button type="submit">Sync GPM</button>
           </form>
           <a class="button secondary" href="/templates">Tạo Template</a>
+          <a class="button secondary" href="/stats">Stats</a>
           <a class="button secondary" href="/admin/settings">Admin Settings</a>
         </div>
       </div>
@@ -256,7 +257,7 @@ export function renderDashboardPage({ profiles, config, filters }) {
         <input type="hidden" name="view" value="${escapeHtml(view)}" />
         <input style="max-width: 320px" type="text" name="q" value="${escapeHtml(query)}" placeholder="Search by profile name" />
         <button type="submit" class="secondary">Search</button>
-        <a class="button ghost" href="${view === "selected" ? "/?view=selected" : "/"}">Clear</a>
+        <a class="button ghost" href="${view === "all" ? "/?view=all" : "/"}">Clear</a>
       </form>
       <p class="mini">Showing ${profiles.length} profile(s) in the current view.</p>
       <div class="table-wrap">
@@ -802,6 +803,174 @@ export function renderTemplatesPage({ profiles, flash = null }) {
   `;
 
   return layout({ title: "Tạo Template Excel", body });
+}
+
+export function renderStatsPage({ profiles, latestByProfile, scrapeInProgress, banner = null }) {
+  const totalSelected = profiles.length;
+  const scrapedCount = profiles.filter((p) => latestByProfile.has(p.profile_id)).length;
+
+  const bannerHtml = banner
+    ? `<p class="status ${banner.kind}" style="margin-bottom: 12px;">${escapeHtml(banner.text)}</p>`
+    : "";
+
+  const rows = profiles.map((profile) => {
+    const stat = latestByProfile.get(profile.profile_id);
+    let lineItemsCell = `<span class="mini">Chưa có dữ liệu</span>`;
+    let statusCell = `<span class="status neutral">chưa cào</span>`;
+    let scrapedAtCell = "";
+    let errorCell = "";
+
+    if (stat) {
+      if (stat.status === "success" && Array.isArray(stat.lineItems) && stat.lineItems.length > 0) {
+        const paymentBlock = `<div class="stack">${stat.lineItems.map((item) => `
+          <div>
+            <div style="font-weight: 600;">${escapeHtml(item.heading || "(no heading)")}</div>
+            <div>${escapeHtml(item.value || "")}</div>
+            ${item.info ? `<div class="mini">${escapeHtml(item.info)}</div>` : ""}
+          </div>
+        `).join("")}</div>`;
+
+        let studioBlock = "";
+        if (stat.studioData) {
+          if (stat.studioData.error) {
+            studioBlock = `<details style="margin-top: 12px;"><summary class="mini">Studio dashboard: lỗi</summary><div class="mini" style="color: var(--bad); white-space: pre-wrap;">${escapeHtml(stat.studioData.error)}</div></details>`;
+          } else {
+            const opts = Array.isArray(stat.studioData.optionLabels) ? stat.studioData.optionLabels : [];
+            const snaps = Array.isArray(stat.studioData.snapshots) ? stat.studioData.snapshots : [];
+            const optsHtml = opts.length
+              ? `<div class="mini">Options: ${opts.map((o) => escapeHtml(o.label || o.value || "")).filter(Boolean).join(" | ")}</div>`
+              : `<div class="mini">Options: (rỗng)</div>`;
+            const snapsHtml = snaps.map((s) => {
+              if (s.error) {
+                return `<div style="margin-top: 6px;"><span class="mini">Item[${s.index}]:</span> <span class="mini" style="color: var(--bad);">${escapeHtml(s.error)}</span></div>`;
+              }
+              const labelText = s.label || "(no label)";
+              const valueText = s.value || "(no value)";
+              const fallbackBadge = (s.labelSelectorUsed === "fallback" || s.valueSelectorUsed === "fallback")
+                ? ` <span class="mini" style="color: var(--warn);">[fallback selector]</span>`
+                : "";
+              return `
+                <div style="margin-top: 6px; padding: 6px 8px; background: rgba(0,0,0,0.04); border-radius: 8px;">
+                  <div class="mini">Item[${s.index}]${s.selectedLabel ? ` — ${escapeHtml(s.selectedLabel)}` : ""}${fallbackBadge}</div>
+                  <div class="mini" style="color: var(--muted);">${escapeHtml(labelText)}</div>
+                  <div style="font-weight: 600;">${escapeHtml(valueText)}</div>
+                </div>
+              `;
+            }).join("");
+            let tableHtml = "";
+            const td = stat.studioData.tableData;
+            if (td) {
+              if (td.error) {
+                tableHtml = `<div style="margin-top: 8px;"><span class="mini" style="color: var(--bad);">Table: ${escapeHtml(td.error)}</span></div>`;
+              } else {
+                const headers = Array.isArray(td.headers) ? td.headers : [];
+                const rowsArr = Array.isArray(td.rows) ? td.rows : [];
+                const headerRow = headers.length
+                  ? `<tr>${headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("")}</tr>`
+                  : "";
+                const bodyRows = rowsArr.map((r) =>
+                  `<tr>${r.map((c) => `<td>${escapeHtml(c)}</td>`).join("")}</tr>`
+                ).join("");
+                const fallbackBadge = td.tableSelectorUsed === "fallback"
+                  ? ` <span class="mini" style="color: var(--warn);">[fallback]</span>`
+                  : "";
+                tableHtml = `
+                  <details style="margin-top: 8px;">
+                    <summary class="mini">Table — ${rowsArr.length} dòng / ${td.pages} trang${fallbackBadge}</summary>
+                    <div class="table-wrap" style="max-height: 320px; overflow: auto; margin-top: 6px;">
+                      <table style="min-width: 0; font-size: 0.85rem;">
+                        ${headerRow ? `<thead>${headerRow}</thead>` : ""}
+                        <tbody>${bodyRows || `<tr><td>(rỗng)</td></tr>`}</tbody>
+                      </table>
+                    </div>
+                  </details>
+                `;
+              }
+            }
+            studioBlock = `<details style="margin-top: 12px;"><summary class="mini">Studio dashboard (option selector: <code>${escapeHtml(stat.studioData.optionSelector || "?")}</code>)</summary>${optsHtml}${snapsHtml}${tableHtml}</details>`;
+          }
+        }
+
+        lineItemsCell = paymentBlock + studioBlock;
+      } else if (stat.status === "success") {
+        lineItemsCell = `<span class="mini">Trang load nhưng không tìm thấy item</span>`;
+      } else {
+        lineItemsCell = `<span class="mini">—</span>`;
+      }
+
+      statusCell = `<span class="status ${stat.status === "success" ? "ok" : stat.status === "skipped" ? "warning" : "error"}">${escapeHtml(stat.status)}</span>`;
+      scrapedAtCell = `<span class="meta">${escapeHtml(stat.scrapedAt || "")}</span>`;
+      errorCell = stat.errorMessage
+        ? `<span class="mini" style="color: var(--bad);">${escapeHtml(stat.errorMessage)}</span>`
+        : "";
+    }
+
+    const rerunDisabled = scrapeInProgress ? "disabled" : "";
+    const rerunLabel = stat ? "Chạy lại" : "Lấy dữ liệu";
+
+    return `
+      <tr>
+        <td>
+          <div><a href="/profiles/${encodeURIComponent(profile.profile_id)}">${escapeHtml(profile.profile_name)}</a></div>
+          <div class="mini"><code>${escapeHtml(profile.profile_id)}</code></div>
+        </td>
+        <td>${lineItemsCell}</td>
+        <td>${statusCell}${errorCell ? `<div style="margin-top: 4px;">${errorCell}</div>` : ""}</td>
+        <td>${scrapedAtCell}</td>
+        <td>
+          <form method="post" action="/stats/scrape/${encodeURIComponent(profile.profile_id)}">
+            <button type="submit" class="ghost" ${rerunDisabled}>${escapeHtml(rerunLabel)}</button>
+          </form>
+        </td>
+      </tr>
+    `;
+  }).join("");
+
+  const buttonAttrs = scrapeInProgress ? "disabled" : "";
+  const buttonLabel = scrapeInProgress ? "Đang chạy..." : "Lấy dữ liệu";
+
+  const body = `
+    <section class="hero">
+      <div class="card">
+        <h1>Profile Statistics</h1>
+        <p class="lede">Cào dữ liệu từ <code>redbubble.com/account/payment_history</code> cho các profile selected. Nhấn nút để chạy tuần tự.</p>
+        <div class="toolbar">
+          <form method="post" action="/stats/scrape">
+            <button type="submit" ${buttonAttrs}>${escapeHtml(buttonLabel)}</button>
+          </form>
+          <a class="button ghost" href="/">Về dashboard</a>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Tổng quan</h3>
+        <div class="stats">
+          <span class="pill">Profile selected: ${totalSelected}</span>
+          <span class="pill">Đã có dữ liệu: ${scrapedCount}</span>
+          <span class="pill">${scrapeInProgress ? "Đang scrape" : "Sẵn sàng"}</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      ${bannerHtml}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Profile</th>
+              <th>Line items</th>
+              <th>Trạng thái</th>
+              <th>Thời điểm cào</th>
+              <th>Hành động</th>
+            </tr>
+          </thead>
+          <tbody>${rows || `<tr><td colspan="5">Chưa có profile nào được selected.</td></tr>`}</tbody>
+        </table>
+      </div>
+    </section>
+  `;
+
+  return layout({ title: "Profile Statistics", body });
 }
 
 export function renderAiSettingsPage({ settings, flash = null, testResult = null }) {

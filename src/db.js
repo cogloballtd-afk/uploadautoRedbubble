@@ -89,6 +89,19 @@ export function createDatabase(dbPath) {
       closed_at TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS profile_payment_stats (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      profile_id TEXT NOT NULL,
+      line_items_json TEXT,
+      page_url TEXT,
+      status TEXT NOT NULL,
+      error_message TEXT,
+      scraped_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_payment_stats_profile
+      ON profile_payment_stats(profile_id, scraped_at DESC);
+
     CREATE TABLE IF NOT EXISTS ai_config (
       id INTEGER PRIMARY KEY CHECK (id = 1),
       active_provider TEXT,
@@ -109,8 +122,15 @@ export function createDatabase(dbPath) {
 
   migrateProfileRuntimeConfig(db);
   migrateProfileRuntimeState(db);
+  migrateProfilePaymentStats(db);
 
   return db;
+}
+
+function migrateProfilePaymentStats(db) {
+  if (!columnExists(db, "profile_payment_stats", "studio_data_json")) {
+    db.exec(`ALTER TABLE profile_payment_stats ADD COLUMN studio_data_json TEXT`);
+  }
 }
 
 function migrateProfileRuntimeState(db) {
@@ -741,4 +761,71 @@ export function getActiveExecutionForProfile(db, profileId) {
     ORDER BY started_at DESC
     LIMIT 1
   `).get(profileId);
+}
+
+export function insertPaymentStat(db, { profileId, lineItems, pageUrl, status, errorMessage, studioData }) {
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO profile_payment_stats (
+      profile_id,
+      line_items_json,
+      page_url,
+      status,
+      error_message,
+      scraped_at,
+      studio_data_json
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    profileId,
+    lineItems ? JSON.stringify(lineItems) : null,
+    pageUrl || null,
+    status,
+    errorMessage || null,
+    now,
+    studioData ? JSON.stringify(studioData) : null
+  );
+}
+
+export function getLatestPaymentStatsByProfile(db) {
+  const rows = db.prepare(`
+    SELECT s.profile_id, s.line_items_json, s.page_url, s.status, s.error_message, s.scraped_at, s.studio_data_json
+    FROM profile_payment_stats s
+    INNER JOIN (
+      SELECT profile_id, MAX(scraped_at) AS max_scraped_at
+      FROM profile_payment_stats
+      GROUP BY profile_id
+    ) latest
+      ON latest.profile_id = s.profile_id
+     AND latest.max_scraped_at = s.scraped_at
+  `).all();
+
+  const map = new Map();
+  for (const row of rows) {
+    let lineItems = null;
+    if (row.line_items_json) {
+      try {
+        lineItems = JSON.parse(row.line_items_json);
+      } catch {
+        lineItems = null;
+      }
+    }
+    let studioData = null;
+    if (row.studio_data_json) {
+      try {
+        studioData = JSON.parse(row.studio_data_json);
+      } catch {
+        studioData = null;
+      }
+    }
+    map.set(row.profile_id, {
+      lineItems,
+      pageUrl: row.page_url,
+      status: row.status,
+      errorMessage: row.error_message,
+      scrapedAt: row.scraped_at,
+      studioData
+    });
+  }
+  return map;
 }

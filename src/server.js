@@ -3,7 +3,7 @@ import express from "express";
 import { getDefaultConfig, mergeConfig } from "./config.js";
 import { createDatabase, getSystemConfig, seedSystemConfig } from "./db.js";
 import { GpmClient } from "./gpmClient.js";
-import { renderAdminSettingsPage, renderAiSettingsPage, renderDashboardPage, renderProfilePage, renderTemplatesPage } from "./html.js";
+import { renderAdminSettingsPage, renderAiSettingsPage, renderDashboardPage, renderProfilePage, renderStatsPage, renderTemplatesPage } from "./html.js";
 import { createAppService } from "./services.js";
 
 export function createServer({ config = getDefaultConfig(), gpmClient, browserClient } = {}) {
@@ -31,7 +31,7 @@ export function createServer({ config = getDefaultConfig(), gpmClient, browserCl
 
   function applyDashboardFilters(profiles, query) {
     const q = typeof query.q === "string" ? query.q.trim().toLowerCase() : "";
-    const view = query.view === "selected" ? "selected" : "all";
+    const view = query.view === "all" ? "all" : "selected";
 
     return profiles.filter((profile) => {
       if (view === "selected" && !profile.enabled) {
@@ -51,7 +51,7 @@ export function createServer({ config = getDefaultConfig(), gpmClient, browserCl
       config: effectiveConfig,
       filters: {
         q: typeof req.query.q === "string" ? req.query.q : "",
-        view: req.query.view === "selected" ? "selected" : "all"
+        view: req.query.view === "all" ? "all" : "selected"
       }
     }));
   });
@@ -62,6 +62,75 @@ export function createServer({ config = getDefaultConfig(), gpmClient, browserCl
       res.redirect("/");
     } catch (error) {
       next(error);
+    }
+  });
+
+  app.get("/stats", (req, res) => {
+    const profiles = service.getDashboardProfiles().filter((p) => p.enabled);
+    const latestByProfile = service.getPaymentStatsByProfile();
+    let banner = null;
+    if (req.query.busy === "1") {
+      banner = { kind: "warning", text: "Đang chạy scrape, vui lòng đợi rồi reload." };
+    } else if (typeof req.query.fatal === "string" && req.query.fatal) {
+      banner = { kind: "error", text: `Lỗi: ${req.query.fatal}` };
+    } else if (typeof req.query.one === "string" && req.query.one) {
+      const status = String(req.query.oneStatus || "");
+      const errorText = typeof req.query.oneError === "string" ? req.query.oneError : "";
+      const kind = status === "success" ? "ok" : status === "skipped" ? "warning" : "error";
+      const detail = errorText ? ` — ${errorText}` : "";
+      banner = { kind, text: `Profile ${req.query.one}: ${status || "unknown"}${detail}` };
+    } else if (req.query.total !== undefined) {
+      const total = Number(req.query.total) || 0;
+      const success = Number(req.query.success) || 0;
+      const skipped = Number(req.query.skipped) || 0;
+      const errors = Number(req.query.errors) || 0;
+      banner = {
+        kind: errors > 0 ? "warning" : "ok",
+        text: `Đã chạy: ${total} profile — thành công ${success}, bỏ qua ${skipped}, lỗi ${errors}.`
+      };
+    }
+    res.send(renderStatsPage({
+      profiles,
+      latestByProfile,
+      scrapeInProgress: service.isPaymentScrapeRunning(),
+      banner
+    }));
+  });
+
+  app.post("/stats/scrape", async (_req, res) => {
+    try {
+      const summary = await service.runPaymentScrapeForSelected();
+      const params = new URLSearchParams({
+        total: String(summary.total),
+        success: String(summary.success),
+        skipped: String(summary.skipped),
+        errors: String(summary.errors)
+      });
+      res.redirect(`/stats?${params.toString()}`);
+    } catch (error) {
+      if (error.code === "scrape_in_progress") {
+        res.redirect("/stats?busy=1");
+        return;
+      }
+      res.redirect(`/stats?fatal=${encodeURIComponent(error.message)}`);
+    }
+  });
+
+  app.post("/stats/scrape/:profileId", async (req, res) => {
+    try {
+      const result = await service.runPaymentScrapeForProfile(req.params.profileId);
+      const params = new URLSearchParams({
+        one: req.params.profileId,
+        oneStatus: result.status
+      });
+      if (result.errorMessage) params.set("oneError", result.errorMessage);
+      res.redirect(`/stats?${params.toString()}`);
+    } catch (error) {
+      if (error.code === "scrape_in_progress") {
+        res.redirect("/stats?busy=1");
+        return;
+      }
+      res.redirect(`/stats?fatal=${encodeURIComponent(error.message)}`);
     }
   });
 

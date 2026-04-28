@@ -8,10 +8,12 @@ import {
   deleteProfileExecution,
   getActiveExecutionForProfile,
   getAiConfig,
+  getLatestPaymentStatsByProfile,
   getProfileDashboardRow,
   getProfileExecution,
   getProfileExecutions,
   getSystemConfig,
+  insertPaymentStat,
   listDashboardProfiles,
   recordProfileRowExecution,
   updateAiConfig,
@@ -104,6 +106,7 @@ export function createAppService({
   browserClient = new PlaywrightBrowserClient()
 }) {
   const activeExecutions = new Map();
+  let paymentScrapeInProgress = false;
 
   function getDashboardProfiles() {
     const systemConfig = getSystemConfig(db);
@@ -895,11 +898,160 @@ export function createAppService({
     });
   }
 
+  function getPaymentStatsByProfile() {
+    return getLatestPaymentStatsByProfile(db);
+  }
+
+  function isPaymentScrapeRunning() {
+    return paymentScrapeInProgress;
+  }
+
+  async function scrapeOnePaymentProfile(profile) {
+    const profileId = profile.profile_id;
+
+    if (profile.runtime_status === "running" || profile.runtime_status === "opening_profile") {
+      insertPaymentStat(db, {
+        profileId,
+        lineItems: null,
+        pageUrl: null,
+        status: "skipped",
+        errorMessage: "Profile đang chạy upload — bỏ qua scrape",
+        studioData: null
+      });
+      console.log(`[payment-scrape] skip ${profileId}: runtime_status=${profile.runtime_status}`);
+      return { status: "skipped" };
+    }
+
+    let session;
+    let attachment;
+    try {
+      console.log(`[payment-scrape] starting profile ${profileId}`);
+      session = await gpmClient.startProfile(profileId);
+      attachment = await browserClient.attachToSession({ session });
+
+      const result = await browserClient.scrapePaymentHistory(attachment);
+      console.log(`[payment-scrape] payment_history ok ${profileId}: ${result.lineItems.length} items`);
+
+      let studioData = null;
+      try {
+        studioData = await browserClient.scrapeStudioDashboard(attachment);
+        console.log(`[payment-scrape] studio_dashboard ok ${profileId}: control=${studioData.controlTag}, options=${studioData.optionLabels.length}, snapshots=${studioData.snapshots.length}`);
+      } catch (studioErr) {
+        studioData = { error: studioErr.message };
+        console.error(`[payment-scrape] studio_dashboard error ${profileId}: ${studioErr.message}`);
+      }
+
+      insertPaymentStat(db, {
+        profileId,
+        lineItems: result.lineItems,
+        pageUrl: result.pageUrl,
+        status: "success",
+        errorMessage: null,
+        studioData
+      });
+      return { status: "success", count: result.lineItems.length };
+    } catch (error) {
+      insertPaymentStat(db, {
+        profileId,
+        lineItems: null,
+        pageUrl: null,
+        status: "error",
+        errorMessage: error.message,
+        studioData: null
+      });
+      console.error(`[payment-scrape] error ${profileId}: ${error.message}`);
+      return { status: "error", errorMessage: error.message };
+    } finally {
+      console.log(`[payment-scrape] cleanup ${profileId}: starting (attachment=${Boolean(attachment)}, session=${Boolean(session)})`);
+      if (attachment) {
+        try {
+          await browserClient.closeAttachment(attachment);
+          console.log(`[payment-scrape] cleanup ${profileId}: attachment closed`);
+        } catch (err) {
+          console.error(`[payment-scrape] closeAttachment ${profileId}: ${err.message}`);
+        }
+      }
+      // Luôn gọi closeProfile nếu đã startProfile, kể cả khi closeAttachment fail.
+      // Race với timeout 15s vì GPM API đôi khi treo.
+      if (session) {
+        try {
+          const startedProfileId = session.profileId || profileId;
+          await Promise.race([
+            gpmClient.closeProfile(startedProfileId),
+            new Promise((_, reject) => setTimeout(() => reject(new Error("GPM closeProfile timeout 15s")), 15000))
+          ]);
+          console.log(`[payment-scrape] cleanup ${profileId}: GPM profile closed`);
+        } catch (err) {
+          console.error(`[payment-scrape] closeProfile ${profileId}: ${err.message}`);
+        }
+      }
+      console.log(`[payment-scrape] cleanup ${profileId}: done`);
+    }
+  }
+
+  async function runPaymentScrapeForSelected() {
+    if (paymentScrapeInProgress) {
+      const err = new Error("Payment scrape đang chạy, vui lòng đợi.");
+      err.code = "scrape_in_progress";
+      throw err;
+    }
+
+    paymentScrapeInProgress = true;
+    const summary = { total: 0, success: 0, skipped: 0, errors: 0 };
+
+    try {
+      const profiles = getDashboardProfiles().filter((p) => p.enabled);
+      summary.total = profiles.length;
+
+      for (const profile of profiles) {
+        const result = await scrapeOnePaymentProfile(profile);
+        if (result.status === "success") summary.success += 1;
+        else if (result.status === "skipped") summary.skipped += 1;
+        else summary.errors += 1;
+      }
+
+      return summary;
+    } finally {
+      paymentScrapeInProgress = false;
+    }
+  }
+
+  async function runPaymentScrapeForProfile(profileId) {
+    if (paymentScrapeInProgress) {
+      const err = new Error("Payment scrape đang chạy, vui lòng đợi.");
+      err.code = "scrape_in_progress";
+      throw err;
+    }
+
+    const profile = getDashboardProfiles().find((p) => p.profile_id === profileId);
+    if (!profile) {
+      const err = new Error(`Profile not found: ${profileId}`);
+      err.code = "profile_not_found";
+      throw err;
+    }
+    if (!profile.enabled) {
+      const err = new Error(`Profile ${profileId} chưa được enabled`);
+      err.code = "profile_not_enabled";
+      throw err;
+    }
+
+    paymentScrapeInProgress = true;
+    try {
+      return await scrapeOnePaymentProfile(profile);
+    } finally {
+      paymentScrapeInProgress = false;
+    }
+  }
+
   return {
     config,
     syncProfiles,
     getAdminSettings,
     getDashboardProfiles,
+    getPaymentStatsByProfile,
+    isPaymentScrapeRunning,
+    runPaymentScrapeForSelected,
+    runPaymentScrapeForProfile,
     getProfileDetail,
     getExecution,
     deleteExecution,

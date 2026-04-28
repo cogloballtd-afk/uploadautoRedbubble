@@ -370,9 +370,362 @@ export class PlaywrightBrowserClient {
     return screenshotPath;
   }
 
-  async closeAttachment(attachment) {
-    if (attachment?.browser) {
-      await attachment.browser.close();
+  async scrapePaymentHistory(attachment, {
+    url = "https://www.redbubble.com/account/payment_history",
+    timeoutMs = 60000
+  } = {}) {
+    const { page } = attachment;
+    try {
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+    } catch (err) {
+      // goto có thể timeout dù page đã commit và đang tiếp tục load — tiếp tục, để waitForSelector xác minh content
+      console.log(`[scrape] payment_history goto warning: ${err.message}`);
     }
+
+    const isCfTitle = (title) => /just a moment|verifying|verify you are human|attention required/i.test(title || "");
+    const cfDeadline = Date.now() + 8000;
+    while (Date.now() < cfDeadline) {
+      const title = await page.title().catch(() => "");
+      if (!isCfTitle(title)) break;
+      await sleep(1000);
+    }
+
+    await page.waitForSelector(".sales-totals", { timeout: timeoutMs });
+
+    const lineItems = await page.$$eval(".sales-totals .total-line-item", (nodes) =>
+      nodes.map((el) => ({
+        heading: el.querySelector(".heading")?.textContent?.trim() || "",
+        value: el.querySelector(".payment-total-amount.value")?.textContent?.trim() || "",
+        info: el.querySelector(".payment-total-amount.info")?.textContent?.trim() || ""
+      }))
+    );
+
+    return { lineItems, pageUrl: page.url() };
+  }
+
+  async scrapeStudioDashboard(attachment, {
+    url = "https://www.redbubble.com/studio/dashboard",
+    timeoutMs = 60000,
+    settleMs = 3000
+  } = {}) {
+    const { page } = attachment;
+    try {
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+    } catch (err) {
+      console.log(`[scrape] studio_dashboard goto warning: ${err.message}`);
+    }
+
+    const isCfTitle = (title) => /just a moment|verifying|verify you are human|attention required/i.test(title || "");
+    const cfDeadline = Date.now() + 8000;
+    while (Date.now() < cfDeadline) {
+      const title = await page.title().catch(() => "");
+      if (!isCfTitle(title)) break;
+      await sleep(1000);
+    }
+
+    // Đợi load xong trước khi tương tác — Redbubble fetch dashboard data sau khi DOM ready
+    await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
+    await sleep(settleMs);
+
+    const selectSelector = '[data-testid="ds-select"]';
+    await page.waitForSelector(selectSelector, { timeout: timeoutMs });
+
+    const optionCandidates = [
+      '[data-testid="ds-select-option"]',
+      '[data-testid*="select-option"]',
+      '[role="option"]',
+      '[role="menuitem"]',
+      'li[role="presentation"]'
+    ];
+
+    const findOpenOptionSelector = async () => {
+      for (const sel of optionCandidates) {
+        const count = await page.locator(sel).count().catch(() => 0);
+        if (count > 0) return sel;
+      }
+      return null;
+    };
+
+    const closeDropdown = async () => {
+      await page.keyboard.press("Escape").catch(() => {});
+      await sleep(250);
+    };
+
+    // Probe — open dropdown, capture option labels, close
+    let optionSelector = null;
+    let optionLabels = [];
+    try {
+      await page.click(selectSelector);
+      await sleep(500);
+      optionSelector = await findOpenOptionSelector();
+      if (optionSelector) {
+        optionLabels = await page.$$eval(optionSelector, (opts) =>
+          opts.map((o, i) => ({ index: i, label: (o.textContent || "").trim() }))
+        ).catch(() => []);
+      }
+      await closeDropdown();
+    } catch {
+      // ignore — handled per iteration below
+    }
+
+    const labelExactSelector = '#app > div > div.ds-theme-find-your-thing.shared-App__dsWrapper--RyVET > div:nth-child(2) > div > div > div > div.shared-components-PageLayout-PageLayout__content--2FmGA > div:nth-child(7) > div.shared-components-ResponsiveCardBody-ResponsiveCardBody__cardBody--oIpvu > span.node_modules--redbubble-design-system-react-Box-styles__box--2Ufmy.node_modules--redbubble-design-system-react-Text-styles__text--23E5U.node_modules--redbubble-design-system-react-Text-styles__body--3StRc.node_modules--redbubble-design-system-react-Text-styles__muted--8wjeu.node_modules--redbubble-design-system-react-Box-styles__display-block--3kWC4';
+    const valueExactSelector = '#app > div > div.ds-theme-find-your-thing.shared-App__dsWrapper--RyVET > div:nth-child(2) > div > div > div > div.shared-components-PageLayout-PageLayout__content--2FmGA > div:nth-child(7) > div.shared-components-ResponsiveCardBody-ResponsiveCardBody__cardBody--oIpvu > span.node_modules--redbubble-design-system-react-Box-styles__box--2Ufmy.node_modules--redbubble-design-system-react-Text-styles__text--23E5U.node_modules--redbubble-design-system-react-Text-styles__display1--2HiLc.node_modules--redbubble-design-system-react-Box-styles__display-block--3kWC4';
+    const labelFallbackSelector = '[class*="PageLayout__content"] > div:nth-child(7) [class*="ResponsiveCardBody__cardBody"] span[class*="Text-styles__body--"][class*="Text-styles__muted--"]';
+    const valueFallbackSelector = '[class*="PageLayout__content"] > div:nth-child(7) [class*="ResponsiveCardBody__cardBody"] span[class*="Text-styles__display1--"]';
+
+    const readText = async (exact, fallback) => {
+      let text = await page.$eval(exact, (el) => (el.textContent || "").trim()).catch(() => null);
+      let usedSelector = exact;
+      if (text === null || text === "") {
+        text = await page.$eval(fallback, (el) => (el.textContent || "").trim()).catch(() => null);
+        usedSelector = fallback;
+      }
+      return { text, usedSelector };
+    };
+
+    const snapshots = [];
+    for (let i = 0; i < 2; i++) {
+      const result = { index: i };
+      try {
+        await page.click(selectSelector);
+        await sleep(600);
+
+        const sel = optionSelector || (await findOpenOptionSelector());
+        if (!sel) {
+          throw new Error("Không tìm thấy option element sau khi click select");
+        }
+
+        const options = await page.$$(sel);
+        if (!options[i]) {
+          throw new Error(`Option index ${i} không tồn tại (chỉ có ${options.length} option)`);
+        }
+        await options[i].click();
+
+        await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
+        await sleep(settleMs);
+        // Wait extra for the value card to actually render text after selection
+        await page.waitForFunction(() => {
+          const v = document.querySelector('[class*="PageLayout__content"] > div:nth-child(7) [class*="ResponsiveCardBody__cardBody"] span[class*="Text-styles__display1--"]');
+          return v && (v.textContent || "").trim().length > 0;
+        }, null, { timeout: 15000 }).catch(() => {});
+
+        const selectedLabel = await page.$eval(selectSelector, (el) => (el.textContent || "").trim()).catch(() => "");
+        const labelRead = await readText(labelExactSelector, labelFallbackSelector);
+        const valueRead = await readText(valueExactSelector, valueFallbackSelector);
+
+        result.optionSelector = sel;
+        result.selectedLabel = selectedLabel;
+        result.label = labelRead.text;
+        result.value = valueRead.text;
+        result.labelSelectorUsed = labelRead.usedSelector === labelExactSelector ? "exact" : "fallback";
+        result.valueSelectorUsed = valueRead.usedSelector === valueExactSelector ? "exact" : "fallback";
+      } catch (err) {
+        result.error = err.message;
+      }
+      snapshots.push(result);
+    }
+
+    // Sau khi click xong dropdown, page có thể đang fetch — chờ network idle + settle trước khi scrape table
+    console.log(`[scrape] dropdown loop done, waiting networkidle before table scrape`);
+    await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
+    await sleep(settleMs);
+
+    let tableData = null;
+    try {
+      console.log(`[scrape] starting scrapeStudioTable`);
+      tableData = await this.scrapeStudioTable(page, { settleMs });
+      console.log(`[scrape] scrapeStudioTable returned (${tableData.rows?.length || 0} rows)`);
+    } catch (err) {
+      console.error(`[scrape] scrapeStudioTable error: ${err.message}`);
+      tableData = { error: err.message };
+    }
+
+    const pageUrl = page.url();
+    console.log(`[scrape] scrapeStudioDashboard returning, pageUrl=${pageUrl}`);
+    return {
+      pageUrl,
+      optionSelector,
+      optionLabels,
+      snapshots,
+      tableData
+    };
+  }
+
+  async scrapeStudioTable(page, { settleMs = 2500, maxPages = 100, tableTimeoutMs = 30000 } = {}) {
+    if (page.isClosed && page.isClosed()) {
+      throw new Error("Page đã đóng trước khi scrape table");
+    }
+
+    const tableExactSelector = '#app > div > div.ds-theme-find-your-thing.shared-App__dsWrapper--RyVET > div:nth-child(2) > div > div > div > div.shared-components-PageLayout-PageLayout__content--2FmGA > div:nth-child(8) > div.shared-components-ResponsiveCardBody-ResponsiveCardBody__cardBody--oIpvu > table';
+    const tableFallbackSelector = '[class*="PageLayout__content"] > div:nth-child(8) [class*="ResponsiveCardBody__cardBody"] table';
+
+    // Poll cho tới khi table xuất hiện (Redbubble render table async sau khi dropdown selection xử lý)
+    let tableSel = null;
+    const deadline = Date.now() + tableTimeoutMs;
+    while (Date.now() < deadline) {
+      if (page.isClosed && page.isClosed()) {
+        throw new Error("Page bị đóng trong khi đợi table xuất hiện");
+      }
+      if (await page.$(tableExactSelector).catch(() => null)) { tableSel = tableExactSelector; break; }
+      if (await page.$(tableFallbackSelector).catch(() => null)) { tableSel = tableFallbackSelector; break; }
+      await sleep(500);
+    }
+    if (!tableSel) throw new Error("Không tìm thấy table ở div:nth-child(8) sau " + Math.round(tableTimeoutMs / 1000) + "s");
+
+    // Đợi tbody có ít nhất 1 row
+    await page.waitForFunction((sel) => {
+      const t = document.querySelector(sel);
+      if (!t) return false;
+      return t.querySelectorAll("tbody tr").length > 0;
+    }, tableSel, { timeout: tableTimeoutMs }).catch(() => {});
+
+    await sleep(settleMs);
+
+    const readTablePage = async () => {
+      return await page.$eval(tableSel, (table) => {
+        const headers = Array.from(table.querySelectorAll("thead th")).map((th) => (th.textContent || "").trim());
+        const rows = Array.from(table.querySelectorAll("tbody tr")).map((tr) =>
+          Array.from(tr.querySelectorAll("td")).map((td) => (td.textContent || "").trim())
+        );
+        return { headers, rows };
+      });
+    };
+
+    const nextButtonCandidates = [
+      '[class*="ArtworkPagination__nextPage"]',
+      '[class*="ArtworkPagination__wrapper"] [class*="nextPage"]',
+      'button[aria-label="Next page"]',
+      'button[aria-label*="Next page" i]',
+      'button[aria-label*="Next" i]',
+      '[data-testid="ds-pagination-next"]',
+      '[data-testid*="pagination-next"]',
+      '[data-testid*="next-page"]'
+    ];
+
+    const findActiveNextButton = async () => {
+      for (const cand of nextButtonCandidates) {
+        const handles = await page.$$(cand);
+        for (const handle of handles) {
+          const isEnabled = await handle.evaluate((el) => {
+            if (el.disabled) return false;
+            if (el.getAttribute("aria-disabled") === "true") return false;
+            const cls = ((el.className && el.className.toString()) || "");
+            if (/disabled/i.test(cls)) return false;
+            const style = window.getComputedStyle(el);
+            if (style.pointerEvents === "none") return false;
+            if (style.visibility === "hidden" || style.display === "none") return false;
+            return true;
+          }).catch(() => false);
+          if (isEnabled) {
+            return { handle, selector: cand };
+          }
+        }
+      }
+      return null;
+    };
+
+    const allHeaders = [];
+    const allRows = [];
+    const seenPageSignatures = new Set();
+    let nextSelectorUsed = null;
+    let pagesScraped = 0;
+
+    for (let p = 0; p < maxPages; p++) {
+      const data = await readTablePage();
+      const pageSignature = JSON.stringify(data.rows);
+      if (seenPageSignatures.has(pageSignature)) {
+        console.log(`[scrape-table] repeated page signature detected at iteration ${p + 1} â€” stop pagination`);
+        break;
+      }
+      seenPageSignatures.add(pageSignature);
+
+      pagesScraped += 1;
+      if (allHeaders.length === 0 && data.headers.length > 0) {
+        allHeaders.push(...data.headers);
+      }
+      allRows.push(...data.rows);
+      console.log(`[scrape-table] page ${pagesScraped}: ${data.rows.length} rows`);
+
+      const next = await findActiveNextButton();
+      if (!next) {
+        console.log(`[scrape-table] no active next button — pagination end after page ${pagesScraped}`);
+        break;
+      }
+      nextSelectorUsed = next.selector;
+
+      const beforeSignature = pageSignature;
+      await next.handle.click().catch(() => {});
+
+      const changed = await page.waitForFunction((sel, prevSig) => {
+        const t = document.querySelector(sel);
+        if (!t) return false;
+        const rows = Array.from(t.querySelectorAll("tbody tr")).map((tr) =>
+          Array.from(tr.querySelectorAll("td")).map((td) => (td.textContent || "").trim())
+        );
+        return JSON.stringify(rows) !== prevSig;
+      }, tableSel, beforeSignature, { timeout: 10000 }).then(() => true).catch(() => false);
+
+      if (!changed) {
+        console.log(`[scrape-table] content didn't change after click — stop at page ${pagesScraped}`);
+        break;
+      }
+
+      await sleep(settleMs);
+    }
+
+    console.log(`[scrape-table] done: ${pagesScraped} pages, ${allRows.length} rows`);
+    return {
+      headers: allHeaders,
+      rows: allRows,
+      pages: pagesScraped,
+      tableSelectorUsed: tableSel === tableExactSelector ? "exact" : "fallback",
+      nextSelectorUsed
+    };
+  }
+
+  async closeAttachment(attachment) {
+    if (!attachment) return;
+    const withTimeout = async (label, action, timeoutMs) => {
+      let timer = null;
+      try {
+        await Promise.race([
+          Promise.resolve().then(action),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`${label} timeout ${timeoutMs}ms`)), timeoutMs);
+          })
+        ]);
+      } catch (err) {
+        console.error(`[scrape] ${label} failed: ${err.message}`);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    };
+
+    const page = attachment.page;
+    const context = page?.context?.();
+    const browser = attachment.browser;
+
+    if (page && !(page.isClosed && page.isClosed())) {
+      await withTimeout("page.close()", () => page.close({ runBeforeUnload: false }), 5000);
+    }
+
+    if (context) {
+      await withTimeout("context.close()", () => context.close(), 5000);
+    }
+
+    if (browser?.isConnected?.()) {
+      await withTimeout("browser.close()", () => browser.close(), 8000);
+    }
+    return;
+    // browser.close() trên CDP-connected browser đôi khi treo nếu page có pending request — race với timeout
+    await Promise.race([
+      attachment.browser.close().catch((err) => {
+        console.error(`[scrape] browser.close() failed: ${err.message}`);
+      }),
+      new Promise((resolve) => setTimeout(() => {
+        console.error(`[scrape] browser.close() timeout 10s — bỏ qua, để GPM tự đóng`);
+        resolve();
+      }, 10000))
+    ]);
   }
 }
