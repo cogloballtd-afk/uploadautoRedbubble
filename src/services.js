@@ -55,6 +55,145 @@ function normalizeStatus(profile) {
   };
 }
 
+export const STATS_RANGES = ["Last 7 days", "Last 30 days", "Last 12 months"];
+
+function parseMoney(text) {
+  if (text === null || text === undefined) return 0;
+  const str = String(text).trim();
+  if (!str) return 0;
+  const negative = /^[-(]/.test(str) || /[-)]\s*$/.test(str);
+  const digits = str.replace(/[^\d.]/g, "");
+  if (!digits) return 0;
+  const n = Number(digits);
+  if (!Number.isFinite(n)) return 0;
+  return negative ? -n : n;
+}
+
+function parseInteger(text) {
+  if (text === null || text === undefined) return 0;
+  const str = String(text).trim();
+  if (!str) return 0;
+  const digits = str.replace(/[^\d]/g, "");
+  if (!digits) return 0;
+  const n = Number(digits);
+  return Number.isFinite(n) ? n : 0;
+}
+
+export function buildStatsAggregate({ profiles, latestByProfile }) {
+  const safeProfiles = Array.isArray(profiles) ? profiles : [];
+  const map = latestByProfile instanceof Map
+    ? latestByProfile
+    : new Map(Object.entries(latestByProfile || {}));
+
+  const ranges = {};
+  for (const range of STATS_RANGES) {
+    const perProfile = [];
+    let globalEarnings = 0;
+    let globalSales = 0;
+    let globalArtworks = 0;
+    let profilesWithData = 0;
+
+    safeProfiles.forEach((profile, index) => {
+      const stat = map.get(profile.profile_id);
+      const studio = stat?.studioData;
+      const rangeData = studio && !studio.error ? studio.byRange?.[range] : null;
+
+      const base = {
+        stt: index + 1,
+        profileId: profile.profile_id,
+        profileName: profile.profile_name,
+        scrapedAt: stat?.scrapedAt || null,
+        scrapeStatus: stat?.status || null
+      };
+
+      if (!stat) {
+        perProfile.push({ ...base, hasData: false, reason: "not_scraped" });
+        return;
+      }
+
+      if (stat.status !== "success") {
+        perProfile.push({ ...base, hasData: false, reason: stat.status || "unknown" });
+        return;
+      }
+
+      if (!rangeData) {
+        perProfile.push({ ...base, hasData: false, reason: "missing_range" });
+        return;
+      }
+
+      if (rangeData.error) {
+        perProfile.push({ ...base, hasData: false, reason: "range_error", error: rangeData.error });
+        return;
+      }
+
+      const artworks = Array.isArray(rangeData.artworks) ? rangeData.artworks : [];
+      let totalSales = 0;
+      let totalEarnings = 0;
+      const productCounts = new Map();
+      const productAmounts = new Map();
+
+      for (const artwork of artworks) {
+        for (const product of artwork.products || []) {
+          const qty = parseInteger(product.quantity);
+          const amount = parseMoney(product.amount);
+          totalSales += qty;
+          totalEarnings += amount;
+          if (product.name) {
+            productCounts.set(product.name, (productCounts.get(product.name) || 0) + qty);
+            productAmounts.set(product.name, (productAmounts.get(product.name) || 0) + amount);
+          }
+        }
+      }
+
+      const productsBreakdown = Array.from(productCounts.entries())
+        .map(([name, quantity]) => ({
+          name,
+          quantity,
+          amount: productAmounts.get(name) || 0
+        }))
+        .sort((a, b) => b.quantity - a.quantity);
+
+      const productsSummary = productsBreakdown
+        .map((p) => `${p.name} ×${p.quantity}`)
+        .join(", ");
+
+      const earningsValueText = rangeData.earningsSummary?.value || "";
+      const summaryEarnings = parseMoney(earningsValueText);
+      const finalEarnings = totalEarnings > 0 ? totalEarnings : summaryEarnings;
+
+      perProfile.push({
+        ...base,
+        hasData: true,
+        artworkCount: artworks.length,
+        totalSales,
+        totalEarnings: finalEarnings,
+        earningsLabel: rangeData.earningsSummary?.label || "",
+        earningsValueText,
+        productsSummary,
+        productsBreakdown,
+        artworks
+      });
+
+      profilesWithData += 1;
+      globalArtworks += artworks.length;
+      globalSales += totalSales;
+      globalEarnings += finalEarnings;
+    });
+
+    ranges[range] = {
+      perProfile,
+      totals: {
+        profilesWithData,
+        artworks: globalArtworks,
+        sales: globalSales,
+        earnings: globalEarnings
+      }
+    };
+  }
+
+  return { ranges };
+}
+
 export function buildValidation(profile, excelFilenameStandard) {
   const folderPath = profile.folder_path;
   if (!folderPath) {
@@ -906,6 +1045,12 @@ export function createAppService({
     return paymentScrapeInProgress;
   }
 
+  function getStatsAggregateByRange() {
+    const latest = getLatestPaymentStatsByProfile(db);
+    const profiles = listDashboardProfiles(db).map(normalizeStatus).filter((p) => p.enabled);
+    return buildStatsAggregate({ profiles, latestByProfile: latest });
+  }
+
   async function scrapeOnePaymentProfile(profile) {
     const profileId = profile.profile_id;
 
@@ -1049,6 +1194,7 @@ export function createAppService({
     getAdminSettings,
     getDashboardProfiles,
     getPaymentStatsByProfile,
+    getStatsAggregateByRange,
     isPaymentScrapeRunning,
     runPaymentScrapeForSelected,
     runPaymentScrapeForProfile,

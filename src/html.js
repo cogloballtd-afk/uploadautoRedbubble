@@ -124,6 +124,77 @@ function layout({ title, body, script = "" }) {
         .cluster { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
         .actions { display: flex; flex-wrap: wrap; gap: 8px; }
         .stack > * + * { margin-top: 12px; }
+        .range-toggle-group {
+          display: inline-flex;
+          gap: 6px;
+          padding: 4px;
+          border: 1px solid var(--line);
+          border-radius: 999px;
+          background: rgba(255,255,255,0.6);
+          margin-bottom: 14px;
+        }
+        .range-toggle {
+          background: transparent;
+          color: var(--text);
+          border: 0;
+          padding: 6px 14px;
+          border-radius: 999px;
+          cursor: pointer;
+          font: inherit;
+        }
+        .range-toggle.active {
+          background: var(--accent-2);
+          color: white;
+        }
+        .view-products-detail > td {
+          background: rgba(0,0,0,0.03);
+        }
+        .earnings-chart {
+          display: grid;
+          grid-template-columns: 220px 1fr;
+          gap: 24px;
+          align-items: center;
+        }
+        .earnings-chart-total {
+          padding: 14px 16px;
+          border: 1px solid var(--line);
+          border-radius: 14px;
+          background: rgba(255,255,255,0.6);
+        }
+        .earnings-chart .bars {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+        .bar-row {
+          display: grid;
+          grid-template-columns: 240px 1fr;
+          gap: 12px;
+          align-items: center;
+        }
+        .bar-label {
+          display: flex;
+          flex-direction: column;
+          line-height: 1.2;
+          overflow: hidden;
+          white-space: nowrap;
+          text-overflow: ellipsis;
+        }
+        .bar-track {
+          background: rgba(0,0,0,0.06);
+          border-radius: 8px;
+          height: 16px;
+          overflow: hidden;
+        }
+        .bar-fill {
+          height: 100%;
+          background: linear-gradient(90deg, var(--accent), var(--accent-2));
+          border-radius: 8px;
+        }
+        @media (max-width: 720px) {
+          .earnings-chart { grid-template-columns: 1fr; }
+          .bar-row { grid-template-columns: 1fr; gap: 4px; }
+        }
         @media (max-width: 900px) {
           .hero { grid-template-columns: 1fr; }
         }
@@ -805,13 +876,213 @@ export function renderTemplatesPage({ profiles, flash = null }) {
   return layout({ title: "Tạo Template Excel", body });
 }
 
-export function renderStatsPage({ profiles, latestByProfile, scrapeInProgress, banner = null }) {
+const STATS_RANGES = ["Last 7 days", "Last 30 days", "Last 12 months"];
+
+function fmtMoney(amount) {
+  if (!Number.isFinite(amount)) return "$0.00";
+  return `$${amount.toFixed(2)}`;
+}
+
+function rangeKeyToId(range) {
+  return range.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+}
+
+function renderAggregateRow(profile, range) {
+  if (!profile.hasData) {
+    const reasonText = profile.reason === "missing_range"
+      ? `Chưa có data cho "${range}" — chạy lại scrape sau khi update`
+      : profile.reason === "not_scraped"
+        ? "Chưa scrape"
+        : profile.reason === "range_error"
+          ? `Lỗi range: ${profile.error || ""}`
+          : profile.reason || "—";
+    return `
+      <tr data-empty="1">
+        <td>${profile.stt}</td>
+        <td>
+          <div><a href="/profiles/${encodeURIComponent(profile.profileId)}">${escapeHtml(profile.profileName)}</a></div>
+          <div class="mini"><code>${escapeHtml(profile.profileId)}</code></div>
+        </td>
+        <td colspan="4"><span class="mini" style="color: var(--muted);">${escapeHtml(reasonText)}</span></td>
+      </tr>
+    `;
+  }
+
+  const viewBtnId = `view-${rangeKeyToId(range)}-${escapeHtml(profile.profileId)}`;
+  return `
+    <tr>
+      <td>${profile.stt}</td>
+      <td>
+        <div><a href="/profiles/${encodeURIComponent(profile.profileId)}">${escapeHtml(profile.profileName)}</a></div>
+        <div class="mini"><code>${escapeHtml(profile.profileId)}</code></div>
+      </td>
+      <td>${profile.artworkCount}</td>
+      <td>${profile.totalSales}</td>
+      <td>
+        <span class="mini" style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;">${escapeHtml(profile.productsSummary || "—")}</span>
+      </td>
+      <td>
+        <button type="button" class="ghost view-products-btn" data-target="${viewBtnId}">Chi tiết</button>
+      </td>
+    </tr>
+    <tr id="${viewBtnId}" class="view-products-detail" style="display: none;">
+      <td colspan="6">
+        ${renderProductsDetail(profile)}
+      </td>
+    </tr>
+  `;
+}
+
+function renderProductsDetail(profile) {
+  const breakdown = Array.isArray(profile.productsBreakdown) ? profile.productsBreakdown : [];
+  const breakdownRows = breakdown.length
+    ? breakdown.map((p) => `
+        <tr>
+          <td>${escapeHtml(p.name)}</td>
+          <td>${p.quantity}</td>
+          <td>${fmtMoney(p.amount)}</td>
+        </tr>
+      `).join("")
+    : `<tr><td colspan="3" class="mini" style="color: var(--muted);">Không có product nào.</td></tr>`;
+
+  const artworks = Array.isArray(profile.artworks) ? profile.artworks : [];
+  const artworkBlocks = artworks.length
+    ? artworks.map((a, i) => {
+        const titleCell = (a.cells && a.cells.find((c) => c)) || `Artwork ${i + 1}`;
+        const productList = (a.products || []).map((p) =>
+          `<li>${escapeHtml(p.name || "")} — ${escapeHtml(p.amount || "")} × ${escapeHtml(p.quantity || "")}</li>`
+        ).join("");
+        return `
+          <details style="margin-top: 6px;">
+            <summary class="mini">${escapeHtml(titleCell)} (${(a.products || []).length} products)</summary>
+            <ul class="mini" style="margin: 6px 0 0 0; padding-left: 20px;">${productList || "<li>(rỗng)</li>"}</ul>
+          </details>
+        `;
+      }).join("")
+    : `<div class="mini" style="color: var(--muted);">Không có artwork.</div>`;
+
+  return `
+    <div style="padding: 8px 4px;">
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+        <div>
+          <h4 style="margin: 0 0 8px 0;">Tổng theo loại product</h4>
+          <table style="min-width: 0; font-size: 0.88rem;">
+            <thead>
+              <tr><th>Product</th><th>Quantity</th><th>Earnings</th></tr>
+            </thead>
+            <tbody>${breakdownRows}</tbody>
+          </table>
+          <div class="mini" style="margin-top: 8px; color: var(--muted);">Earnings: ${fmtMoney(profile.totalEarnings)} · Total sales: ${profile.totalSales} · Artworks: ${profile.artworkCount}</div>
+        </div>
+        <div>
+          <h4 style="margin: 0 0 8px 0;">Theo từng artwork</h4>
+          <div style="max-height: 280px; overflow: auto;">${artworkBlocks}</div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderEarningsChart(perProfile) {
+  const profilesWithData = perProfile.filter((p) => p.hasData && p.totalEarnings > 0);
+  if (profilesWithData.length === 0) {
+    return `<div class="mini" style="color: var(--muted); padding: 16px;">Chưa có earnings nào trong range này.</div>`;
+  }
+
+  const sorted = [...profilesWithData].sort((a, b) => b.totalEarnings - a.totalEarnings);
+  const maxEarnings = sorted[0].totalEarnings;
+  const totalEarnings = sorted.reduce((sum, p) => sum + p.totalEarnings, 0);
+
+  const bars = sorted.map((p) => {
+    const widthPct = Math.max(2, (p.totalEarnings / maxEarnings) * 100);
+    const sharePct = (p.totalEarnings / totalEarnings) * 100;
+    return `
+      <div class="bar-row">
+        <div class="bar-label">
+          <span title="${escapeHtml(p.profileName)}">${escapeHtml(p.profileName)}</span>
+          <span class="mini" style="color: var(--muted);">${fmtMoney(p.totalEarnings)} · ${sharePct.toFixed(1)}%</span>
+        </div>
+        <div class="bar-track">
+          <div class="bar-fill" style="width: ${widthPct.toFixed(2)}%"></div>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  return `
+    <div class="earnings-chart">
+      <div class="earnings-chart-total">
+        <div class="mini" style="color: var(--muted);">Tổng earnings ${escapeHtml(profilesWithData.length === 1 ? "1 profile" : `${profilesWithData.length} profiles`)}</div>
+        <div style="font-size: 1.6rem; font-weight: 600;">${fmtMoney(totalEarnings)}</div>
+      </div>
+      <div class="bars">${bars}</div>
+    </div>
+  `;
+}
+
+export function renderStatsPage({ profiles, latestByProfile, aggregate, scrapeInProgress, banner = null }) {
   const totalSelected = profiles.length;
   const scrapedCount = profiles.filter((p) => latestByProfile.has(p.profile_id)).length;
+  const safeAggregate = aggregate && aggregate.ranges ? aggregate : { ranges: {} };
 
   const bannerHtml = banner
     ? `<p class="status ${banner.kind}" style="margin-bottom: 12px;">${escapeHtml(banner.text)}</p>`
     : "";
+
+  const defaultRange = STATS_RANGES[0];
+  const rangeButtons = STATS_RANGES.map((range) => `
+    <button type="button" class="range-toggle ${range === defaultRange ? "active" : ""}" data-range="${escapeHtml(range)}">${escapeHtml(range)}</button>
+  `).join("");
+
+  const aggregatePanels = STATS_RANGES.map((range) => {
+    const data = safeAggregate.ranges[range];
+    const perProfile = data?.perProfile || profiles.map((p, i) => ({
+      stt: i + 1,
+      profileId: p.profile_id,
+      profileName: p.profile_name,
+      hasData: false,
+      reason: "missing_range"
+    }));
+    const totals = data?.totals || { profilesWithData: 0, artworks: 0, sales: 0, earnings: 0 };
+
+    const tableRows = perProfile.map((profile) => renderAggregateRow(profile, range)).join("");
+
+    return `
+      <div class="range-panel" data-range="${escapeHtml(range)}" ${range === defaultRange ? "" : "hidden"}>
+        <div class="stats" style="margin-bottom: 12px;">
+          <span class="pill">Profiles có data: ${totals.profilesWithData} / ${profiles.length}</span>
+          <span class="pill">Artworks: ${totals.artworks}</span>
+          <span class="pill">Sales: ${totals.sales}</span>
+          <span class="pill">Earnings: ${fmtMoney(totals.earnings)}</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>STT</th>
+                <th>Profile</th>
+                <th>Artwork</th>
+                <th>Total</th>
+                <th>Products Sold</th>
+                <th>View products</th>
+              </tr>
+            </thead>
+            <tbody>${tableRows || `<tr><td colspan="6">Không có profile.</td></tr>`}</tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  const chartPanels = STATS_RANGES.map((range) => {
+    const data = safeAggregate.ranges[range];
+    const perProfile = data?.perProfile || [];
+    return `
+      <div class="range-panel" data-range="${escapeHtml(range)}" ${range === defaultRange ? "" : "hidden"}>
+        ${renderEarningsChart(perProfile)}
+      </div>
+    `;
+  }).join("");
 
   const rows = profiles.map((profile) => {
     const stat = latestByProfile.get(profile.profile_id);
@@ -834,60 +1105,27 @@ export function renderStatsPage({ profiles, latestByProfile, scrapeInProgress, b
         if (stat.studioData) {
           if (stat.studioData.error) {
             studioBlock = `<details style="margin-top: 12px;"><summary class="mini">Studio dashboard: lỗi</summary><div class="mini" style="color: var(--bad); white-space: pre-wrap;">${escapeHtml(stat.studioData.error)}</div></details>`;
-          } else {
-            const opts = Array.isArray(stat.studioData.optionLabels) ? stat.studioData.optionLabels : [];
-            const snaps = Array.isArray(stat.studioData.snapshots) ? stat.studioData.snapshots : [];
-            const optsHtml = opts.length
-              ? `<div class="mini">Options: ${opts.map((o) => escapeHtml(o.label || o.value || "")).filter(Boolean).join(" | ")}</div>`
-              : `<div class="mini">Options: (rỗng)</div>`;
-            const snapsHtml = snaps.map((s) => {
-              if (s.error) {
-                return `<div style="margin-top: 6px;"><span class="mini">Item[${s.index}]:</span> <span class="mini" style="color: var(--bad);">${escapeHtml(s.error)}</span></div>`;
-              }
-              const labelText = s.label || "(no label)";
-              const valueText = s.value || "(no value)";
-              const fallbackBadge = (s.labelSelectorUsed === "fallback" || s.valueSelectorUsed === "fallback")
-                ? ` <span class="mini" style="color: var(--warn);">[fallback selector]</span>`
-                : "";
+          } else if (stat.studioData.byRange) {
+            const rangesHtml = STATS_RANGES.map((range) => {
+              const r = stat.studioData.byRange[range];
+              if (!r) return `<div class="mini" style="color: var(--muted);">${escapeHtml(range)}: (rỗng)</div>`;
+              if (r.error) return `<div class="mini" style="color: var(--bad);">${escapeHtml(range)}: ${escapeHtml(r.error)}</div>`;
+              const earnings = r.earningsSummary || {};
+              const artworkCount = Array.isArray(r.artworks) ? r.artworks.length : 0;
+              const productCount = Array.isArray(r.artworks)
+                ? r.artworks.reduce((s, a) => s + (a.products?.length || 0), 0)
+                : 0;
               return `
                 <div style="margin-top: 6px; padding: 6px 8px; background: rgba(0,0,0,0.04); border-radius: 8px;">
-                  <div class="mini">Item[${s.index}]${s.selectedLabel ? ` — ${escapeHtml(s.selectedLabel)}` : ""}${fallbackBadge}</div>
-                  <div class="mini" style="color: var(--muted);">${escapeHtml(labelText)}</div>
-                  <div style="font-weight: 600;">${escapeHtml(valueText)}</div>
+                  <div class="mini" style="color: var(--muted);">${escapeHtml(range)} — ${escapeHtml(earnings.label || "")}</div>
+                  <div style="font-weight: 600;">${escapeHtml(earnings.value || "—")}</div>
+                  <div class="mini">${artworkCount} artworks · ${productCount} products</div>
                 </div>
               `;
             }).join("");
-            let tableHtml = "";
-            const td = stat.studioData.tableData;
-            if (td) {
-              if (td.error) {
-                tableHtml = `<div style="margin-top: 8px;"><span class="mini" style="color: var(--bad);">Table: ${escapeHtml(td.error)}</span></div>`;
-              } else {
-                const headers = Array.isArray(td.headers) ? td.headers : [];
-                const rowsArr = Array.isArray(td.rows) ? td.rows : [];
-                const headerRow = headers.length
-                  ? `<tr>${headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("")}</tr>`
-                  : "";
-                const bodyRows = rowsArr.map((r) =>
-                  `<tr>${r.map((c) => `<td>${escapeHtml(c)}</td>`).join("")}</tr>`
-                ).join("");
-                const fallbackBadge = td.tableSelectorUsed === "fallback"
-                  ? ` <span class="mini" style="color: var(--warn);">[fallback]</span>`
-                  : "";
-                tableHtml = `
-                  <details style="margin-top: 8px;">
-                    <summary class="mini">Table — ${rowsArr.length} dòng / ${td.pages} trang${fallbackBadge}</summary>
-                    <div class="table-wrap" style="max-height: 320px; overflow: auto; margin-top: 6px;">
-                      <table style="min-width: 0; font-size: 0.85rem;">
-                        ${headerRow ? `<thead>${headerRow}</thead>` : ""}
-                        <tbody>${bodyRows || `<tr><td>(rỗng)</td></tr>`}</tbody>
-                      </table>
-                    </div>
-                  </details>
-                `;
-              }
-            }
-            studioBlock = `<details style="margin-top: 12px;"><summary class="mini">Studio dashboard (option selector: <code>${escapeHtml(stat.studioData.optionSelector || "?")}</code>)</summary>${optsHtml}${snapsHtml}${tableHtml}</details>`;
+            studioBlock = `<details style="margin-top: 12px;"><summary class="mini">Studio dashboard — chi tiết 3 ranges</summary>${rangesHtml}</details>`;
+          } else {
+            studioBlock = `<details style="margin-top: 12px;"><summary class="mini">Studio dashboard (data cũ)</summary><div class="mini" style="color: var(--warn);">Format cũ — chạy lại "Lấy dữ liệu" để cập nhật theo 3 range.</div></details>`;
           }
         }
 
@@ -929,11 +1167,41 @@ export function renderStatsPage({ profiles, latestByProfile, scrapeInProgress, b
   const buttonAttrs = scrapeInProgress ? "disabled" : "";
   const buttonLabel = scrapeInProgress ? "Đang chạy..." : "Lấy dữ liệu";
 
+  const statsScript = `
+    (function () {
+      const buttons = document.querySelectorAll('.range-toggle');
+      const setRange = (range) => {
+        document.querySelectorAll('.range-toggle').forEach((btn) => {
+          btn.classList.toggle('active', btn.dataset.range === range);
+        });
+        document.querySelectorAll('.range-panel').forEach((panel) => {
+          if (panel.dataset.range === range) {
+            panel.removeAttribute('hidden');
+          } else {
+            panel.setAttribute('hidden', '');
+          }
+        });
+      };
+      buttons.forEach((btn) => {
+        btn.addEventListener('click', () => setRange(btn.dataset.range));
+      });
+      document.querySelectorAll('.view-products-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const target = document.getElementById(btn.dataset.target);
+          if (!target) return;
+          const visible = target.style.display !== 'none';
+          target.style.display = visible ? 'none' : 'table-row';
+          btn.textContent = visible ? 'Chi tiết' : 'Đóng';
+        });
+      });
+    })();
+  `;
+
   const body = `
     <section class="hero">
       <div class="card">
         <h1>Profile Statistics</h1>
-        <p class="lede">Cào dữ liệu từ <code>redbubble.com/account/payment_history</code> cho các profile selected. Nhấn nút để chạy tuần tự.</p>
+        <p class="lede">Cào dữ liệu từ <code>redbubble.com/studio/dashboard</code> theo 3 mốc thời gian, tổng hợp earnings & sales toàn bộ profile.</p>
         <div class="toolbar">
           <form method="post" action="/stats/scrape">
             <button type="submit" ${buttonAttrs}>${escapeHtml(buttonLabel)}</button>
@@ -943,16 +1211,25 @@ export function renderStatsPage({ profiles, latestByProfile, scrapeInProgress, b
       </div>
       <div class="card">
         <h3>Tổng quan</h3>
-        <div class="stats">
+        <div class="stats" style="margin-bottom: 12px;">
           <span class="pill">Profile selected: ${totalSelected}</span>
           <span class="pill">Đã có dữ liệu: ${scrapedCount}</span>
           <span class="pill">${scrapeInProgress ? "Đang scrape" : "Sẵn sàng"}</span>
         </div>
+        <div class="range-toggle-group">${rangeButtons}</div>
+        ${aggregatePanels}
       </div>
     </section>
 
-    <section class="card">
+    <section class="card" style="margin-top: 20px;">
+      <h2 style="margin-top: 0;">Earnings Summary</h2>
+      <p class="mini" style="color: var(--muted); margin-bottom: 12px;">Tổng earnings của tất cả profile, đổi theo nút bấm phía trên.</p>
+      ${chartPanels}
+    </section>
+
+    <section class="card" style="margin-top: 20px;">
       ${bannerHtml}
+      <h2 style="margin-top: 0;">Chi tiết theo profile</h2>
       <div class="table-wrap">
         <table>
           <thead>
@@ -970,7 +1247,7 @@ export function renderStatsPage({ profiles, latestByProfile, scrapeInProgress, b
     </section>
   `;
 
-  return layout({ title: "Profile Statistics", body });
+  return layout({ title: "Profile Statistics", body, script: statsScript });
 }
 
 export function renderAiSettingsPage({ settings, flash = null, testResult = null }) {

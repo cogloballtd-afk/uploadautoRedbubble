@@ -406,7 +406,8 @@ export class PlaywrightBrowserClient {
   async scrapeStudioDashboard(attachment, {
     url = "https://www.redbubble.com/studio/dashboard",
     timeoutMs = 60000,
-    settleMs = 3000
+    settleMs = 3000,
+    targetRanges = ["Last 7 days", "Last 30 days", "Last 12 months"]
   } = {}) {
     const { page } = attachment;
     try {
@@ -423,7 +424,6 @@ export class PlaywrightBrowserClient {
       await sleep(1000);
     }
 
-    // Đợi load xong trước khi tương tác — Redbubble fetch dashboard data sau khi DOM ready
     await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
     await sleep(settleMs);
 
@@ -468,90 +468,95 @@ export class PlaywrightBrowserClient {
       // ignore — handled per iteration below
     }
 
-    const labelExactSelector = '#app > div > div.ds-theme-find-your-thing.shared-App__dsWrapper--RyVET > div:nth-child(2) > div > div > div > div.shared-components-PageLayout-PageLayout__content--2FmGA > div:nth-child(7) > div.shared-components-ResponsiveCardBody-ResponsiveCardBody__cardBody--oIpvu > span.node_modules--redbubble-design-system-react-Box-styles__box--2Ufmy.node_modules--redbubble-design-system-react-Text-styles__text--23E5U.node_modules--redbubble-design-system-react-Text-styles__body--3StRc.node_modules--redbubble-design-system-react-Text-styles__muted--8wjeu.node_modules--redbubble-design-system-react-Box-styles__display-block--3kWC4';
-    const valueExactSelector = '#app > div > div.ds-theme-find-your-thing.shared-App__dsWrapper--RyVET > div:nth-child(2) > div > div > div > div.shared-components-PageLayout-PageLayout__content--2FmGA > div:nth-child(7) > div.shared-components-ResponsiveCardBody-ResponsiveCardBody__cardBody--oIpvu > span.node_modules--redbubble-design-system-react-Box-styles__box--2Ufmy.node_modules--redbubble-design-system-react-Text-styles__text--23E5U.node_modules--redbubble-design-system-react-Text-styles__display1--2HiLc.node_modules--redbubble-design-system-react-Box-styles__display-block--3kWC4';
-    const labelFallbackSelector = '[class*="PageLayout__content"] > div:nth-child(7) [class*="ResponsiveCardBody__cardBody"] span[class*="Text-styles__body--"][class*="Text-styles__muted--"]';
-    const valueFallbackSelector = '[class*="PageLayout__content"] > div:nth-child(7) [class*="ResponsiveCardBody__cardBody"] span[class*="Text-styles__display1--"]';
+    console.log(`[scrape] studio dropdown options: ${JSON.stringify(optionLabels.map((o) => o.label))}`);
 
-    const readText = async (exact, fallback) => {
-      let text = await page.$eval(exact, (el) => (el.textContent || "").trim()).catch(() => null);
-      let usedSelector = exact;
-      if (text === null || text === "") {
-        text = await page.$eval(fallback, (el) => (el.textContent || "").trim()).catch(() => null);
-        usedSelector = fallback;
-      }
-      return { text, usedSelector };
+    const earningsSummaryFallback = '[class*="PageLayout__content"] > div:nth-child(7) [class*="ResponsiveCardBody__cardBody"]';
+
+    const readEarningsSummary = async () => {
+      return await page.$eval(earningsSummaryFallback, (root) => {
+        const labelEl = root.querySelector('span[class*="Text-styles__body--"][class*="Text-styles__muted--"]');
+        const valueEl = root.querySelector('span[class*="Text-styles__display1--"]');
+        return {
+          label: labelEl?.textContent?.trim() || "",
+          value: valueEl?.textContent?.trim() || ""
+        };
+      }).catch(() => ({ label: "", value: "" }));
     };
 
-    const snapshots = [];
-    for (let i = 0; i < 2; i++) {
-      const result = { index: i };
+    const matchOption = (targetLabel) => {
+      const target = targetLabel.toLowerCase();
+      return optionLabels.find((o) => o.label.toLowerCase() === target)
+        || optionLabels.find((o) => o.label.toLowerCase().includes(target));
+    };
+
+    const byRange = {};
+
+    for (const targetLabel of targetRanges) {
+      const optMatch = matchOption(targetLabel);
+      if (!optMatch) {
+        byRange[targetLabel] = {
+          error: `Option "${targetLabel}" not found in dropdown (available: ${optionLabels.map((o) => o.label).join(" | ")})`
+        };
+        console.error(`[scrape] range "${targetLabel}" not in dropdown`);
+        continue;
+      }
+
       try {
         await page.click(selectSelector);
         await sleep(600);
-
         const sel = optionSelector || (await findOpenOptionSelector());
-        if (!sel) {
-          throw new Error("Không tìm thấy option element sau khi click select");
-        }
+        if (!sel) throw new Error("Option element not found after opening dropdown");
 
-        const options = await page.$$(sel);
-        if (!options[i]) {
-          throw new Error(`Option index ${i} không tồn tại (chỉ có ${options.length} option)`);
+        const opts = await page.$$(sel);
+        if (!opts[optMatch.index]) {
+          throw new Error(`Option index ${optMatch.index} not found (have ${opts.length})`);
         }
-        await options[i].click();
+        await opts[optMatch.index].click();
 
         await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
         await sleep(settleMs);
-        // Wait extra for the value card to actually render text after selection
         await page.waitForFunction(() => {
           const v = document.querySelector('[class*="PageLayout__content"] > div:nth-child(7) [class*="ResponsiveCardBody__cardBody"] span[class*="Text-styles__display1--"]');
           return v && (v.textContent || "").trim().length > 0;
         }, null, { timeout: 15000 }).catch(() => {});
 
         const selectedLabel = await page.$eval(selectSelector, (el) => (el.textContent || "").trim()).catch(() => "");
-        const labelRead = await readText(labelExactSelector, labelFallbackSelector);
-        const valueRead = await readText(valueExactSelector, valueFallbackSelector);
+        const earningsSummary = await readEarningsSummary();
 
-        result.optionSelector = sel;
-        result.selectedLabel = selectedLabel;
-        result.label = labelRead.text;
-        result.value = valueRead.text;
-        result.labelSelectorUsed = labelRead.usedSelector === labelExactSelector ? "exact" : "fallback";
-        result.valueSelectorUsed = valueRead.usedSelector === valueExactSelector ? "exact" : "fallback";
+        let artworkData;
+        try {
+          artworkData = await this.scrapeEarningsByArtwork(page, { settleMs });
+        } catch (err) {
+          console.error(`[scrape] earnings_by_artwork error for "${targetLabel}": ${err.message}`);
+          artworkData = { error: err.message };
+        }
+
+        byRange[targetLabel] = {
+          selectedLabel,
+          earningsSummary,
+          artworkHeaders: artworkData.headers || [],
+          artworks: artworkData.artworks || [],
+          pages: artworkData.pages || 0,
+          artworksError: artworkData.error || null
+        };
+        console.log(`[scrape] range "${targetLabel}" ok: ${(artworkData.artworks || []).length} artworks, earnings=${earningsSummary.value}`);
       } catch (err) {
-        result.error = err.message;
+        console.error(`[scrape] range "${targetLabel}" failed: ${err.message}`);
+        byRange[targetLabel] = { error: err.message };
       }
-      snapshots.push(result);
-    }
-
-    // Sau khi click xong dropdown, page có thể đang fetch — chờ network idle + settle trước khi scrape table
-    console.log(`[scrape] dropdown loop done, waiting networkidle before table scrape`);
-    await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
-    await sleep(settleMs);
-
-    let tableData = null;
-    try {
-      console.log(`[scrape] starting scrapeStudioTable`);
-      tableData = await this.scrapeStudioTable(page, { settleMs });
-      console.log(`[scrape] scrapeStudioTable returned (${tableData.rows?.length || 0} rows)`);
-    } catch (err) {
-      console.error(`[scrape] scrapeStudioTable error: ${err.message}`);
-      tableData = { error: err.message };
     }
 
     const pageUrl = page.url();
-    console.log(`[scrape] scrapeStudioDashboard returning, pageUrl=${pageUrl}`);
+    console.log(`[scrape] scrapeStudioDashboard returning, pageUrl=${pageUrl}, ranges=${Object.keys(byRange).join(",")}`);
     return {
       pageUrl,
       optionSelector,
       optionLabels,
-      snapshots,
-      tableData
+      byRange
     };
   }
 
-  async scrapeStudioTable(page, { settleMs = 2500, maxPages = 100, tableTimeoutMs = 30000 } = {}) {
+  async scrapeEarningsByArtwork(page, { settleMs = 2500, maxPages = 100, tableTimeoutMs = 30000 } = {}) {
     if (page.isClosed && page.isClosed()) {
       throw new Error("Page đã đóng trước khi scrape table");
     }
@@ -559,7 +564,6 @@ export class PlaywrightBrowserClient {
     const tableExactSelector = '#app > div > div.ds-theme-find-your-thing.shared-App__dsWrapper--RyVET > div:nth-child(2) > div > div > div > div.shared-components-PageLayout-PageLayout__content--2FmGA > div:nth-child(8) > div.shared-components-ResponsiveCardBody-ResponsiveCardBody__cardBody--oIpvu > table';
     const tableFallbackSelector = '[class*="PageLayout__content"] > div:nth-child(8) [class*="ResponsiveCardBody__cardBody"] table';
 
-    // Poll cho tới khi table xuất hiện (Redbubble render table async sau khi dropdown selection xử lý)
     let tableSel = null;
     const deadline = Date.now() + tableTimeoutMs;
     while (Date.now() < deadline) {
@@ -570,9 +574,8 @@ export class PlaywrightBrowserClient {
       if (await page.$(tableFallbackSelector).catch(() => null)) { tableSel = tableFallbackSelector; break; }
       await sleep(500);
     }
-    if (!tableSel) throw new Error("Không tìm thấy table ở div:nth-child(8) sau " + Math.round(tableTimeoutMs / 1000) + "s");
+    if (!tableSel) throw new Error("Không tìm thấy table 'Earnings by artwork and product' sau " + Math.round(tableTimeoutMs / 1000) + "s");
 
-    // Đợi tbody có ít nhất 1 row
     await page.waitForFunction((sel) => {
       const t = document.querySelector(sel);
       if (!t) return false;
@@ -581,13 +584,56 @@ export class PlaywrightBrowserClient {
 
     await sleep(settleMs);
 
+    // Expand "View products" / chevron buttons so the inline product breakdown rows render in DOM.
+    // Redbubble keeps these collapsed by default; click them all on every page before reading.
+    const expandAllRows = async () => {
+      await page.evaluate((sel) => {
+        const t = document.querySelector(sel);
+        if (!t) return 0;
+        const rows = Array.from(t.querySelectorAll("tbody > tr"));
+        let clicked = 0;
+        for (const tr of rows) {
+          // Skip rows that are themselves the inline breakdown row.
+          if (tr.querySelector('td[class*="inlineTableCell"]')) continue;
+          const btn = tr.querySelector(
+            'button[aria-expanded="false"], button[aria-label*="View products" i], button[aria-label*="expand" i]'
+          );
+          if (btn) {
+            btn.click();
+            clicked += 1;
+          }
+        }
+        return clicked;
+      }, tableSel).catch(() => 0);
+      await sleep(600);
+    };
+
     const readTablePage = async () => {
       return await page.$eval(tableSel, (table) => {
         const headers = Array.from(table.querySelectorAll("thead th")).map((th) => (th.textContent || "").trim());
-        const rows = Array.from(table.querySelectorAll("tbody tr")).map((tr) =>
-          Array.from(tr.querySelectorAll("td")).map((td) => (td.textContent || "").trim())
-        );
-        return { headers, rows };
+        const trs = Array.from(table.querySelectorAll("tbody > tr"));
+        const artworks = [];
+        for (const tr of trs) {
+          const inlineCell = tr.querySelector('td[class*="inlineTableCell"]');
+          if (inlineCell) {
+            if (artworks.length === 0) continue;
+            const innerRows = inlineCell.querySelectorAll("table tbody tr");
+            innerRows.forEach((innerTr) => {
+              const cells = Array.from(innerTr.querySelectorAll("td")).map((td) => (td.textContent || "").trim());
+              if (cells.length === 0 || cells.every((c) => !c)) return;
+              artworks[artworks.length - 1].products.push({
+                name: cells[0] || "",
+                amount: cells[1] || "",
+                quantity: cells[2] || ""
+              });
+            });
+            continue;
+          }
+          const cells = Array.from(tr.querySelectorAll("td")).map((td) => (td.textContent || "").trim());
+          if (cells.length === 0 || cells.every((c) => !c)) continue;
+          artworks.push({ cells, products: [] });
+        }
+        return { headers, artworks };
       });
     };
 
@@ -624,31 +670,36 @@ export class PlaywrightBrowserClient {
       return null;
     };
 
+    const signatureOf = (artworks) =>
+      JSON.stringify(artworks.map((a) => a.cells));
+
     const allHeaders = [];
-    const allRows = [];
-    const seenPageSignatures = new Set();
+    const allArtworks = [];
+    const seenSignatures = new Set();
     let nextSelectorUsed = null;
     let pagesScraped = 0;
 
     for (let p = 0; p < maxPages; p++) {
+      await expandAllRows();
       const data = await readTablePage();
-      const pageSignature = JSON.stringify(data.rows);
-      if (seenPageSignatures.has(pageSignature)) {
-        console.log(`[scrape-table] repeated page signature detected at iteration ${p + 1} â€” stop pagination`);
+      const pageSignature = signatureOf(data.artworks);
+      if (seenSignatures.has(pageSignature)) {
+        console.log(`[scrape-artwork] repeated page signature at iteration ${p + 1} — stop pagination`);
         break;
       }
-      seenPageSignatures.add(pageSignature);
+      seenSignatures.add(pageSignature);
 
       pagesScraped += 1;
       if (allHeaders.length === 0 && data.headers.length > 0) {
         allHeaders.push(...data.headers);
       }
-      allRows.push(...data.rows);
-      console.log(`[scrape-table] page ${pagesScraped}: ${data.rows.length} rows`);
+      allArtworks.push(...data.artworks);
+      const productTotal = data.artworks.reduce((sum, a) => sum + a.products.length, 0);
+      console.log(`[scrape-artwork] page ${pagesScraped}: ${data.artworks.length} artworks, ${productTotal} products`);
 
       const next = await findActiveNextButton();
       if (!next) {
-        console.log(`[scrape-table] no active next button — pagination end after page ${pagesScraped}`);
+        console.log(`[scrape-artwork] no active next button — pagination end after page ${pagesScraped}`);
         break;
       }
       nextSelectorUsed = next.selector;
@@ -659,24 +710,25 @@ export class PlaywrightBrowserClient {
       const changed = await page.waitForFunction((sel, prevSig) => {
         const t = document.querySelector(sel);
         if (!t) return false;
-        const rows = Array.from(t.querySelectorAll("tbody tr")).map((tr) =>
-          Array.from(tr.querySelectorAll("td")).map((td) => (td.textContent || "").trim())
-        );
-        return JSON.stringify(rows) !== prevSig;
+        const trs = Array.from(t.querySelectorAll("tbody > tr"));
+        const cells = trs
+          .filter((tr) => !tr.querySelector('td[class*="inlineTableCell"]'))
+          .map((tr) => Array.from(tr.querySelectorAll("td")).map((td) => (td.textContent || "").trim()));
+        return JSON.stringify(cells) !== prevSig;
       }, tableSel, beforeSignature, { timeout: 10000 }).then(() => true).catch(() => false);
 
       if (!changed) {
-        console.log(`[scrape-table] content didn't change after click — stop at page ${pagesScraped}`);
+        console.log(`[scrape-artwork] content didn't change after click — stop at page ${pagesScraped}`);
         break;
       }
 
       await sleep(settleMs);
     }
 
-    console.log(`[scrape-table] done: ${pagesScraped} pages, ${allRows.length} rows`);
+    console.log(`[scrape-artwork] done: ${pagesScraped} pages, ${allArtworks.length} artworks`);
     return {
       headers: allHeaders,
-      rows: allRows,
+      artworks: allArtworks,
       pages: pagesScraped,
       tableSelectorUsed: tableSel === tableExactSelector ? "exact" : "fallback",
       nextSelectorUsed

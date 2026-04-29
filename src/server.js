@@ -92,6 +92,7 @@ export function createServer({ config = getDefaultConfig(), gpmClient, browserCl
     res.send(renderStatsPage({
       profiles,
       latestByProfile,
+      aggregate: service.getStatsAggregateByRange(),
       scrapeInProgress: service.isPaymentScrapeRunning(),
       banner
     }));
