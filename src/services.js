@@ -89,41 +89,57 @@ function summarizeProductsBreakdown(productCounts, productAmounts) {
     .sort((a, b) => b.quantity - a.quantity);
 }
 
-function buildModernRangeStats(rangeData) {
-  const artworks = Array.isArray(rangeData.artworks) ? rangeData.artworks : [];
-  let totalSales = 0;
-  let totalEarnings = 0;
-  const productCounts = new Map();
-  const productAmounts = new Map();
+function findColumnIndex(headers, regex, fallback) {
+  if (!Array.isArray(headers)) return fallback;
+  const i = headers.findIndex((h) => regex.test(String(h).toLowerCase()));
+  return i === -1 ? fallback : i;
+}
 
-  for (const artwork of artworks) {
-    for (const product of artwork.products || []) {
-      const qty = parseInteger(product.quantity);
-      const amount = parseMoney(product.amount);
-      totalSales += qty;
-      totalEarnings += amount;
-      if (product.name) {
-        productCounts.set(product.name, (productCounts.get(product.name) || 0) + qty);
-        productAmounts.set(product.name, (productAmounts.get(product.name) || 0) + amount);
-      }
-    }
+function enrichArtwork(artwork, headers) {
+  const cells = Array.isArray(artwork.cells) ? artwork.cells : [];
+  const products = Array.isArray(artwork.products) ? artwork.products : [];
+  const name = String(cells[0] ?? "").trim() || "(unnamed)";
+
+  let productsSold = 0;
+  let totalEarnings = 0;
+  for (const p of products) {
+    productsSold += parseInteger(p.quantity);
+    totalEarnings += parseMoney(p.amount);
   }
 
-  const productsBreakdown = summarizeProductsBreakdown(productCounts, productAmounts);
-  const productsSummary = productsBreakdown.map((p) => `${p.name} ×${p.quantity}`).join(", ");
+  if (productsSold === 0 || totalEarnings === 0) {
+    const earningsCol = findColumnIndex(headers, /earning|revenue|amount|payment/, 1);
+    const qtyCol = findColumnIndex(headers, /sold|quantity|sales|orders|units/, 2);
+    if (productsSold === 0) productsSold = parseInteger(cells[qtyCol]);
+    if (totalEarnings === 0) totalEarnings = parseMoney(cells[earningsCol]);
+  }
+
+  return { name, productsSold, totalEarnings, products, cells };
+}
+
+function buildModernRangeStats(rangeData) {
+  const rawArtworks = Array.isArray(rangeData.artworks) ? rangeData.artworks : [];
+  const headers = rangeData.artworkHeaders || [];
+  const enriched = rawArtworks.map((a) => enrichArtwork(a, headers));
+
+  let totalSales = 0;
+  let totalEarnings = 0;
+  for (const a of enriched) {
+    totalSales += a.productsSold;
+    totalEarnings += a.totalEarnings;
+  }
+
   const earningsValueText = rangeData.earningsSummary?.value || "";
   const summaryEarnings = parseMoney(earningsValueText);
   const finalEarnings = totalEarnings > 0 ? totalEarnings : summaryEarnings;
 
   return {
-    artworkCount: artworks.length,
+    artworkCount: enriched.length,
     totalSales,
     totalEarnings: finalEarnings,
     earningsLabel: rangeData.earningsSummary?.label || "",
     earningsValueText,
-    productsSummary,
-    productsBreakdown,
-    artworks,
+    artworks: enriched,
     source: "modern"
   };
 }
@@ -150,55 +166,30 @@ function buildLegacyRangeStats(studio, range) {
   const earningsLabel = matchingSnap?.label || "";
   const snapshotEarnings = parseMoney(earningsValueText);
 
-  let artworkCount = 0;
+  const enriched = [];
   let totalSales = 0;
   let totalEarningsFromTable = 0;
-  const artworks = [];
-  const productCounts = new Map();
-  const productAmounts = new Map();
 
   if (tableMatchesRange) {
-    const headers = (td.headers || []).map((h) => String(h).toLowerCase());
-    const findCol = (regex, fallback) => {
-      const i = headers.findIndex((h) => regex.test(h));
-      return i === -1 ? fallback : i;
-    };
-    const earningsCol = findCol(/earning|revenue|amount|payment/, 1);
-    const qtyCol = findCol(/sold|quantity|sales|orders|units/, 2);
-
+    const headers = td.headers || [];
     const dataRows = td.rows.filter((r) => Array.isArray(r) && r.some((c) => String(c ?? "").trim() !== ""));
-    artworkCount = dataRows.length;
     for (const row of dataRows) {
-      const earned = parseMoney(row[earningsCol]);
-      const qty = parseInteger(row[qtyCol]);
-      totalEarningsFromTable += earned;
-      totalSales += qty;
-      artworks.push({ cells: row, products: [] });
-
-      const nameCell = String(row[0] ?? "").trim();
-      if (nameCell && qty > 0) {
-        productCounts.set(nameCell, (productCounts.get(nameCell) || 0) + qty);
-        productAmounts.set(nameCell, (productAmounts.get(nameCell) || 0) + earned);
-      }
+      const enrichedRow = enrichArtwork({ cells: row, products: [] }, headers);
+      enriched.push(enrichedRow);
+      totalSales += enrichedRow.productsSold;
+      totalEarningsFromTable += enrichedRow.totalEarnings;
     }
   }
 
   const finalEarnings = totalEarningsFromTable > 0 ? totalEarningsFromTable : snapshotEarnings;
-  const productsBreakdown = summarizeProductsBreakdown(productCounts, productAmounts);
-  let productsSummary = productsBreakdown.map((p) => `${p.name} ×${p.quantity}`).join(", ");
-  if (!productsSummary && artworkCount > 0) {
-    productsSummary = `(legacy: ${totalSales} sales, không có product breakdown)`;
-  }
 
   return {
-    artworkCount,
+    artworkCount: enriched.length,
     totalSales,
     totalEarnings: finalEarnings,
     earningsLabel,
     earningsValueText,
-    productsSummary,
-    productsBreakdown,
-    artworks,
+    artworks: enriched,
     source: tableMatchesRange ? "legacy_full" : "legacy_earnings_only"
   };
 }
@@ -212,6 +203,7 @@ export function buildStatsAggregate({ profiles, latestByProfile }) {
   const ranges = {};
   for (const range of STATS_RANGES) {
     const perProfile = [];
+    const artworkRows = [];
     let globalEarnings = 0;
     let globalSales = 0;
     let globalArtworks = 0;
@@ -265,14 +257,31 @@ export function buildStatsAggregate({ profiles, latestByProfile }) {
         ...stats
       });
 
+      for (const artwork of stats.artworks) {
+        artworkRows.push({
+          artworkName: artwork.name,
+          profileId: profile.profile_id,
+          profileName: profile.profile_name,
+          productsSold: artwork.productsSold,
+          totalEarnings: artwork.totalEarnings,
+          products: artwork.products,
+          cells: artwork.cells,
+          source: stats.source
+        });
+      }
+
       profilesWithData += 1;
       globalArtworks += stats.artworkCount;
       globalSales += stats.totalSales;
       globalEarnings += stats.totalEarnings;
     });
 
+    artworkRows.sort((a, b) => b.totalEarnings - a.totalEarnings || b.productsSold - a.productsSold);
+    artworkRows.forEach((row, i) => { row.stt = i + 1; });
+
     ranges[range] = {
       perProfile,
+      artworkRows,
       totals: {
         profilesWithData,
         artworks: globalArtworks,

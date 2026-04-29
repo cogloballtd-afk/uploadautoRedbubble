@@ -887,99 +887,49 @@ function rangeKeyToId(range) {
   return range.toLowerCase().replace(/[^a-z0-9]+/g, "-");
 }
 
-function renderAggregateRow(profile, range) {
-  if (!profile.hasData) {
-    const reasonText = profile.reason === "missing_range"
-      ? `Chưa có data cho "${range}" — chạy lại scrape sau khi update`
-      : profile.reason === "not_scraped"
-        ? "Chưa scrape"
-        : profile.reason === "range_error"
-          ? `Lỗi range: ${profile.error || ""}`
-          : profile.reason || "—";
-    return `
-      <tr data-empty="1">
-        <td>${profile.stt}</td>
-        <td>
-          <div><a href="/profiles/${encodeURIComponent(profile.profileId)}">${escapeHtml(profile.profileName)}</a></div>
-          <div class="mini"><code>${escapeHtml(profile.profileId)}</code></div>
-        </td>
-        <td colspan="4"><span class="mini" style="color: var(--muted);">${escapeHtml(reasonText)}</span></td>
-      </tr>
-    `;
+function renderArtworkProductsDetail(artwork) {
+  const products = Array.isArray(artwork.products) ? artwork.products : [];
+  if (products.length === 0) {
+    return `<div class="mini" style="color: var(--muted); padding: 8px 4px;">Không có chi tiết product cho artwork này (data cũ — chạy lại scrape để có breakdown).</div>`;
   }
-
-  const viewBtnId = `view-${rangeKeyToId(range)}-${escapeHtml(profile.profileId)}`;
-  return `
+  const rows = products.map((p) => `
     <tr>
-      <td>${profile.stt}</td>
-      <td>
-        <div><a href="/profiles/${encodeURIComponent(profile.profileId)}">${escapeHtml(profile.profileName)}</a></div>
-        <div class="mini"><code>${escapeHtml(profile.profileId)}</code></div>
-      </td>
-      <td>${profile.artworkCount}</td>
-      <td>${profile.totalSales}</td>
-      <td>
-        <span class="mini" style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;">${escapeHtml(profile.productsSummary || "—")}</span>
-      </td>
-      <td>
-        <button type="button" class="ghost view-products-btn" data-target="${viewBtnId}">Chi tiết</button>
-      </td>
+      <td>${escapeHtml(p.name || "")}</td>
+      <td>${escapeHtml(p.amount || "")}</td>
+      <td>${escapeHtml(p.quantity || "")}</td>
     </tr>
-    <tr id="${viewBtnId}" class="view-products-detail" style="display: none;">
-      <td colspan="6">
-        ${renderProductsDetail(profile)}
-      </td>
-    </tr>
+  `).join("");
+  return `
+    <div style="padding: 8px 4px;">
+      <table style="min-width: 0; font-size: 0.88rem;">
+        <thead>
+          <tr><th>Product</th><th>Earnings</th><th>Quantity</th></tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
   `;
 }
 
-function renderProductsDetail(profile) {
-  const breakdown = Array.isArray(profile.productsBreakdown) ? profile.productsBreakdown : [];
-  const breakdownRows = breakdown.length
-    ? breakdown.map((p) => `
-        <tr>
-          <td>${escapeHtml(p.name)}</td>
-          <td>${p.quantity}</td>
-          <td>${fmtMoney(p.amount)}</td>
-        </tr>
-      `).join("")
-    : `<tr><td colspan="3" class="mini" style="color: var(--muted);">Không có product nào.</td></tr>`;
-
-  const artworks = Array.isArray(profile.artworks) ? profile.artworks : [];
-  const artworkBlocks = artworks.length
-    ? artworks.map((a, i) => {
-        const titleCell = (a.cells && a.cells.find((c) => c)) || `Artwork ${i + 1}`;
-        const productList = (a.products || []).map((p) =>
-          `<li>${escapeHtml(p.name || "")} — ${escapeHtml(p.amount || "")} × ${escapeHtml(p.quantity || "")}</li>`
-        ).join("");
-        return `
-          <details style="margin-top: 6px;">
-            <summary class="mini">${escapeHtml(titleCell)} (${(a.products || []).length} products)</summary>
-            <ul class="mini" style="margin: 6px 0 0 0; padding-left: 20px;">${productList || "<li>(rỗng)</li>"}</ul>
-          </details>
-        `;
-      }).join("")
-    : `<div class="mini" style="color: var(--muted);">Không có artwork.</div>`;
-
+function renderArtworkRow(artwork, range, idx) {
+  const detailId = `art-${rangeKeyToId(range)}-${idx}`;
   return `
-    <div style="padding: 8px 4px;">
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
-        <div>
-          <h4 style="margin: 0 0 8px 0;">Tổng theo loại product</h4>
-          <table style="min-width: 0; font-size: 0.88rem;">
-            <thead>
-              <tr><th>Product</th><th>Quantity</th><th>Earnings</th></tr>
-            </thead>
-            <tbody>${breakdownRows}</tbody>
-          </table>
-          <div class="mini" style="margin-top: 8px; color: var(--muted);">Earnings: ${fmtMoney(profile.totalEarnings)} · Total sales: ${profile.totalSales} · Artworks: ${profile.artworkCount}</div>
-        </div>
-        <div>
-          <h4 style="margin: 0 0 8px 0;">Theo từng artwork</h4>
-          <div style="max-height: 280px; overflow: auto;">${artworkBlocks}</div>
-        </div>
-      </div>
-    </div>
+    <tr>
+      <td>${artwork.stt}</td>
+      <td><span title="${escapeHtml(artwork.artworkName)}">${escapeHtml(artwork.artworkName)}</span></td>
+      <td>
+        <div><a href="/profiles/${encodeURIComponent(artwork.profileId)}">${escapeHtml(artwork.profileName)}</a></div>
+        <div class="mini"><code>${escapeHtml(artwork.profileId)}</code></div>
+      </td>
+      <td>${artwork.productsSold}</td>
+      <td>${fmtMoney(artwork.totalEarnings)}</td>
+      <td>
+        <button type="button" class="ghost view-products-btn" data-target="${detailId}">Chi tiết</button>
+      </td>
+    </tr>
+    <tr id="${detailId}" class="view-products-detail" style="display: none;">
+      <td colspan="6">${renderArtworkProductsDetail(artwork)}</td>
+    </tr>
   `;
 }
 
@@ -1036,38 +986,34 @@ export function renderStatsPage({ profiles, latestByProfile, aggregate, scrapeIn
 
   const aggregatePanels = STATS_RANGES.map((range) => {
     const data = safeAggregate.ranges[range];
-    const perProfile = data?.perProfile || profiles.map((p, i) => ({
-      stt: i + 1,
-      profileId: p.profile_id,
-      profileName: p.profile_name,
-      hasData: false,
-      reason: "missing_range"
-    }));
+    const artworkRows = Array.isArray(data?.artworkRows) ? data.artworkRows : [];
     const totals = data?.totals || { profilesWithData: 0, artworks: 0, sales: 0, earnings: 0 };
 
-    const tableRows = perProfile.map((profile) => renderAggregateRow(profile, range)).join("");
+    const tableRows = artworkRows.length > 0
+      ? artworkRows.map((a, i) => renderArtworkRow(a, range, i)).join("")
+      : `<tr><td colspan="6"><span class="mini" style="color: var(--muted);">Chưa có artwork nào trong range này. Bấm "Lấy dữ liệu" để scrape.</span></td></tr>`;
 
     return `
       <div class="range-panel" data-range="${escapeHtml(range)}" ${range === defaultRange ? "" : "hidden"}>
         <div class="stats" style="margin-bottom: 12px;">
           <span class="pill">Profiles có data: ${totals.profilesWithData} / ${profiles.length}</span>
           <span class="pill">Artworks: ${totals.artworks}</span>
-          <span class="pill">Sales: ${totals.sales}</span>
-          <span class="pill">Earnings: ${fmtMoney(totals.earnings)}</span>
+          <span class="pill">Total Sales: ${totals.sales}</span>
+          <span class="pill">Total Earnings: ${fmtMoney(totals.earnings)}</span>
         </div>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
                 <th>STT</th>
-                <th>Profile</th>
                 <th>Artwork</th>
-                <th>Total</th>
+                <th>Profile</th>
                 <th>Products Sold</th>
+                <th>Total</th>
                 <th>View products</th>
               </tr>
             </thead>
-            <tbody>${tableRows || `<tr><td colspan="6">Không có profile.</td></tr>`}</tbody>
+            <tbody>${tableRows}</tbody>
           </table>
         </div>
       </div>
