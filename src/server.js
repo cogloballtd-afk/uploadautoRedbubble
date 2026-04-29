@@ -68,8 +68,19 @@ export function createServer({ config = getDefaultConfig(), gpmClient, browserCl
   app.get("/stats", (req, res) => {
     const profiles = service.getDashboardProfiles().filter((p) => p.enabled);
     const latestByProfile = service.getPaymentStatsByProfile();
+    const scrapeProgress = service.getPaymentScrapeProgress();
+    const lastScrapeReport = service.getLastPaymentScrapeReport();
     let banner = null;
-    if (req.query.busy === "1") {
+    if (scrapeProgress?.status === "running") {
+      banner = null;
+    } else if (lastScrapeReport?.status === "failed") {
+      banner = { kind: "error", text: `Lá»—i scrape: ${lastScrapeReport.errorMessage || "unknown"}` };
+    } else if (lastScrapeReport?.status === "completed") {
+      banner = {
+        kind: lastScrapeReport.errors > 0 ? "warning" : "ok",
+        text: `ÄÃ£ cháº¡y: ${lastScrapeReport.total} profile â€” thÃ nh cÃ´ng ${lastScrapeReport.success}, bá» qua ${lastScrapeReport.skipped}, lá»—i ${lastScrapeReport.errors}.`
+      };
+    } else if (req.query.busy === "1") {
       banner = { kind: "warning", text: "Đang chạy scrape, vui lòng đợi rồi reload." };
     } else if (typeof req.query.fatal === "string" && req.query.fatal) {
       banner = { kind: "error", text: `Lỗi: ${req.query.fatal}` };
@@ -94,27 +105,22 @@ export function createServer({ config = getDefaultConfig(), gpmClient, browserCl
       latestByProfile,
       aggregate: service.getStatsAggregateByRange(),
       scrapeInProgress: service.isPaymentScrapeRunning(),
+      scrapeProgress,
       banner
     }));
   });
 
   app.post("/stats/scrape", async (_req, res) => {
-    try {
-      const summary = await service.runPaymentScrapeForSelected();
-      const params = new URLSearchParams({
-        total: String(summary.total),
-        success: String(summary.success),
-        skipped: String(summary.skipped),
-        errors: String(summary.errors)
-      });
-      res.redirect(`/stats?${params.toString()}`);
-    } catch (error) {
-      if (error.code === "scrape_in_progress") {
-        res.redirect("/stats?busy=1");
-        return;
-      }
-      res.redirect(`/stats?fatal=${encodeURIComponent(error.message)}`);
+    if (service.isPaymentScrapeRunning()) {
+      res.redirect("/stats?busy=1");
+      return;
     }
+
+    const task = service.runPaymentScrapeForSelected();
+    task.catch((error) => {
+      console.error(`[stats] batch scrape failed: ${error.message}`);
+    });
+    res.redirect("/stats?busy=1");
   });
 
   app.post("/stats/scrape/:profileId", async (req, res) => {

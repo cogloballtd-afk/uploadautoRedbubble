@@ -468,7 +468,8 @@ export class PlaywrightBrowserClient {
       // ignore — handled per iteration below
     }
 
-    console.log(`[scrape] studio dropdown options: ${JSON.stringify(optionLabels.map((o) => o.label))}`);
+    const safeOptionLabels = Array.isArray(optionLabels) ? optionLabels : [];
+    console.log(`[scrape] studio dropdown options: ${JSON.stringify(safeOptionLabels.map((o) => o?.label || ""))}`);
 
     const earningsSummaryFallback = '[class*="PageLayout__content"] > div:nth-child(7) [class*="ResponsiveCardBody__cardBody"]';
 
@@ -485,8 +486,8 @@ export class PlaywrightBrowserClient {
 
     const matchOption = (targetLabel) => {
       const target = targetLabel.toLowerCase();
-      return optionLabels.find((o) => o.label.toLowerCase() === target)
-        || optionLabels.find((o) => o.label.toLowerCase().includes(target));
+      return safeOptionLabels.find((o) => (o?.label || "").toLowerCase() === target)
+        || safeOptionLabels.find((o) => (o?.label || "").toLowerCase().includes(target));
     };
 
     const byRange = {};
@@ -495,7 +496,7 @@ export class PlaywrightBrowserClient {
       const optMatch = matchOption(targetLabel);
       if (!optMatch) {
         byRange[targetLabel] = {
-          error: `Option "${targetLabel}" not found in dropdown (available: ${optionLabels.map((o) => o.label).join(" | ")})`
+          error: `Option "${targetLabel}" not found in dropdown (available: ${safeOptionLabels.map((o) => o?.label || "").join(" | ")})`
         };
         console.error(`[scrape] range "${targetLabel}" not in dropdown`);
         continue;
@@ -507,7 +508,7 @@ export class PlaywrightBrowserClient {
         const sel = optionSelector || (await findOpenOptionSelector());
         if (!sel) throw new Error("Option element not found after opening dropdown");
 
-        const opts = await page.$$(sel);
+        const opts = await page.$$(sel).catch(() => []);
         if (!opts[optMatch.index]) {
           throw new Error(`Option index ${optMatch.index} not found (have ${opts.length})`);
         }
@@ -539,7 +540,8 @@ export class PlaywrightBrowserClient {
           pages: artworkData.pages || 0,
           artworksError: artworkData.error || null
         };
-        console.log(`[scrape] range "${targetLabel}" ok: ${(artworkData.artworks || []).length} artworks, earnings=${earningsSummary.value}`);
+        const scrapedArtworks = Array.isArray(artworkData?.artworks) ? artworkData.artworks : [];
+        console.log(`[scrape] range "${targetLabel}" ok: ${scrapedArtworks.length} artworks, earnings=${earningsSummary?.value || ""}`);
       } catch (err) {
         console.error(`[scrape] range "${targetLabel}" failed: ${err.message}`);
         byRange[targetLabel] = { error: err.message };
@@ -698,8 +700,9 @@ export class PlaywrightBrowserClient {
         allHeaders.push(...data.headers);
       }
       allArtworks.push(...data.artworks);
-      const productTotal = data.artworks.reduce((sum, a) => sum + a.products.length, 0);
-      console.log(`[scrape-artwork] page ${pagesScraped}: ${data.artworks.length} artworks, ${productTotal} products`);
+      const safeArtworks = Array.isArray(data?.artworks) ? data.artworks : [];
+      const productTotal = safeArtworks.reduce((sum, a) => sum + (Array.isArray(a?.products) ? a.products.length : 0), 0);
+      console.log(`[scrape-artwork] page ${pagesScraped}: ${safeArtworks.length} artworks, ${productTotal} products`);
 
       const next = await findActiveNextButton();
       if (!next) {

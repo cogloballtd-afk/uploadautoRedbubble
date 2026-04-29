@@ -81,6 +81,10 @@ function layout({ title, body, script = "" }) {
         button.warn { background: #7a5b21; }
         button.danger { background: #7c2121; }
         .table-wrap { overflow: auto; }
+        .table-wrap.table-wrap--ten-rows {
+          height: 690px;
+          overflow-y: auto;
+        }
         table { width: 100%; border-collapse: collapse; min-width: 1180px; }
         th, td { text-align: left; padding: 12px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
         th { color: var(--muted); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.08em; }
@@ -169,11 +173,34 @@ function layout({ title, body, script = "" }) {
         }
         .artwork-thumb-link { display: inline-block; }
         .artwork-thumb-link:hover .artwork-thumb { border-color: var(--accent); }
+        .stats-summary-table .summary-row > td,
+        .stats-summary-table .summary-empty-row > td {
+          height: 62px;
+        }
+        .stats-summary-table .summary-empty-row > td {
+          color: transparent;
+        }
+        .summary-artwork-title {
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+          line-height: 1.3;
+          max-height: 2.6em;
+        }
+        .summary-profile-link {
+          display: inline-block;
+          max-width: 320px;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          vertical-align: bottom;
+        }
         .earnings-chart {
           display: grid;
           grid-template-columns: 220px 1fr;
           gap: 24px;
-          align-items: center;
+          align-items: stretch;
         }
         .earnings-chart-total {
           padding: 14px 16px;
@@ -181,39 +208,83 @@ function layout({ title, body, script = "" }) {
           border-radius: 14px;
           background: rgba(255,255,255,0.6);
         }
-        .earnings-chart .bars {
+        .earnings-chart-columns {
+          display: grid;
+          grid-template-columns: 56px 1fr;
+          gap: 14px;
+          align-items: stretch;
+        }
+        .earnings-chart-y-axis {
+          display: grid;
+          grid-template-rows: repeat(5, 1fr);
+          height: 320px;
+          font-size: 0.82rem;
+          color: var(--muted);
+          text-align: right;
+        }
+        .earnings-chart-plot {
+          position: relative;
+          display: grid;
+          grid-template-rows: 1fr auto;
+          gap: 12px;
+        }
+        .earnings-chart-grid {
+          position: relative;
+          height: 320px;
+          border-left: 1px solid var(--line);
+          border-bottom: 1px solid var(--line);
+          background:
+            repeating-linear-gradient(
+              to top,
+              rgba(0,0,0,0.06) 0,
+              rgba(0,0,0,0.06) 1px,
+              transparent 1px,
+              transparent 25%
+            );
+          padding: 12px 18px 0;
+          display: flex;
+          align-items: end;
+          justify-content: space-around;
+          gap: 18px;
+        }
+        .earnings-chart-column {
+          flex: 1 1 0;
+          max-width: 180px;
+          height: 100%;
           display: flex;
           flex-direction: column;
+          justify-content: end;
+          align-items: center;
           gap: 10px;
         }
-        .bar-row {
-          display: grid;
-          grid-template-columns: 240px 1fr;
-          gap: 12px;
-          align-items: center;
+        .earnings-chart-value {
+          font-size: 0.84rem;
+          color: var(--muted);
         }
-        .bar-label {
+        .earnings-chart-bar {
+          width: min(100%, 96px);
+          min-height: 12px;
+          background: linear-gradient(180deg, var(--accent), var(--accent-2));
+          border-radius: 14px 14px 0 0;
+          box-shadow: 0 8px 18px rgba(32, 91, 79, 0.18);
+        }
+        .earnings-chart-labels {
           display: flex;
-          flex-direction: column;
-          line-height: 1.2;
-          overflow: hidden;
-          white-space: nowrap;
-          text-overflow: ellipsis;
+          justify-content: space-around;
+          gap: 18px;
+          padding: 0 18px;
         }
-        .bar-track {
-          background: rgba(0,0,0,0.06);
-          border-radius: 8px;
-          height: 16px;
-          overflow: hidden;
-        }
-        .bar-fill {
-          height: 100%;
-          background: linear-gradient(90deg, var(--accent), var(--accent-2));
-          border-radius: 8px;
+        .earnings-chart-label {
+          flex: 1 1 0;
+          max-width: 180px;
+          text-align: center;
+          font-size: 0.86rem;
+          line-height: 1.25;
         }
         @media (max-width: 720px) {
           .earnings-chart { grid-template-columns: 1fr; }
-          .bar-row { grid-template-columns: 1fr; gap: 4px; }
+          .earnings-chart-columns { grid-template-columns: 1fr; }
+          .earnings-chart-y-axis { display: none; }
         }
         @media (max-width: 900px) {
           .hero { grid-template-columns: 1fr; }
@@ -947,12 +1018,12 @@ function renderArtworkThumbnail(artwork) {
 function renderArtworkRow(artwork, range, idx) {
   const detailId = `art-${rangeKeyToId(range)}-${idx}`;
   return `
-    <tr>
+    <tr class="summary-row">
       <td>${artwork.stt}</td>
       <td>${renderArtworkThumbnail(artwork)}</td>
-      <td><span title="${escapeHtml(artwork.artworkName)}">${escapeHtml(artwork.artworkName)}</span></td>
+      <td><span class="summary-artwork-title" title="${escapeHtml(artwork.artworkName)}">${escapeHtml(artwork.artworkName)}</span></td>
       <td>
-        <div><a href="/profiles/${encodeURIComponent(artwork.profileId)}">${escapeHtml(artwork.profileName)}</a></div>
+        <div><a class="summary-profile-link" href="/profiles/${encodeURIComponent(artwork.profileId)}">${escapeHtml(artwork.profileName)}</a></div>
         <div class="mini"><code>${escapeHtml(artwork.profileId)}</code></div>
       </td>
       <td>${artwork.productsSold}</td>
@@ -963,6 +1034,20 @@ function renderArtworkRow(artwork, range, idx) {
     </tr>
     <tr id="${detailId}" class="view-products-detail" style="display: none;">
       <td colspan="7">${renderArtworkProductsDetail(artwork)}</td>
+    </tr>
+  `;
+}
+
+function renderArtworkEmptyRow() {
+  return `
+    <tr class="summary-empty-row" aria-hidden="true">
+      <td>&nbsp;</td>
+      <td>&nbsp;</td>
+      <td>&nbsp;</td>
+      <td>&nbsp;</td>
+      <td>&nbsp;</td>
+      <td>&nbsp;</td>
+      <td>&nbsp;</td>
     </tr>
   `;
 }
@@ -1004,13 +1089,82 @@ function renderEarningsChart(perProfile) {
   `;
 }
 
-export function renderStatsPage({ profiles, latestByProfile, aggregate, scrapeInProgress, banner = null }) {
+function renderEarningsSummaryChart(ranges) {
+  const series = STATS_RANGES.map((range) => {
+    const totals = ranges?.[range]?.totals || {};
+    return {
+      label: range,
+      earnings: Number(totals.earnings || 0)
+    };
+  });
+
+  const totalEarnings = series.reduce((sum, item) => sum + item.earnings, 0);
+  const maxEarnings = Math.max(...series.map((item) => item.earnings), 0);
+
+  if (maxEarnings <= 0) {
+    return `<div class="mini" style="color: var(--muted); padding: 16px;">Chua co earnings de ve bieu do.</div>`;
+  }
+
+  const yAxisLabels = Array.from({ length: 5 }, (_unused, index) => {
+    const steps = 4;
+    const value = maxEarnings * ((steps - index) / steps);
+    return `<div>${fmtMoney(value)}</div>`;
+  }).join("");
+
+  const columns = series.map((item) => {
+    const chartHeightPx = 260;
+    const heightPx = Math.max(12, (item.earnings / maxEarnings) * chartHeightPx);
+    return `
+      <div class="earnings-chart-column">
+        <div class="earnings-chart-value">${fmtMoney(item.earnings)}</div>
+        <div class="earnings-chart-bar" style="height: ${heightPx.toFixed(0)}px;"></div>
+      </div>
+    `;
+  }).join("");
+
+  const labels = series.map((item) => `
+    <div class="earnings-chart-label">${escapeHtml(item.label)}</div>
+  `).join("");
+
+  return `
+    <div class="earnings-chart">
+      <div class="earnings-chart-total">
+        <div class="mini" style="color: var(--muted);">Tong earnings cua 3 moc thoi gian</div>
+        <div style="font-size: 1.6rem; font-weight: 600;">${fmtMoney(totalEarnings)}</div>
+      </div>
+      <div class="earnings-chart-columns">
+        <div class="earnings-chart-y-axis">${yAxisLabels}</div>
+        <div class="earnings-chart-plot">
+          <div class="earnings-chart-grid">${columns}</div>
+          <div class="earnings-chart-labels">${labels}</div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+export function renderStatsPage({ profiles, latestByProfile, aggregate, scrapeInProgress, scrapeProgress = null, banner = null }) {
+  const SUMMARY_VISIBLE_ROWS = 10;
   const totalSelected = profiles.length;
   const scrapedCount = profiles.filter((p) => latestByProfile.has(p.profile_id)).length;
   const safeAggregate = aggregate && aggregate.ranges ? aggregate : { ranges: {} };
 
   const bannerHtml = banner
     ? `<p class="status ${banner.kind}" style="margin-bottom: 12px;">${escapeHtml(banner.text)}</p>`
+    : "";
+  const progressHtml = scrapeProgress?.status === "running"
+    ? `
+      <div class="card" style="margin-top: 14px; border-color: var(--accent-2);">
+        <div class="stats" style="margin-bottom: 10px;">
+          <span class="pill">Dang chay batch ${escapeHtml(scrapeProgress.currentBatch)} / ${escapeHtml(scrapeProgress.totalBatches)}</span>
+          <span class="pill">Da chay ${escapeHtml(scrapeProgress.processedProfiles)} / ${escapeHtml(scrapeProgress.totalProfiles)} profile</span>
+          <span class="pill">Thanh cong ${escapeHtml(scrapeProgress.success)}</span>
+          <span class="pill">Bo qua ${escapeHtml(scrapeProgress.skipped)}</span>
+          <span class="pill">Loi ${escapeHtml(scrapeProgress.errors)}</span>
+        </div>
+        <p class="mini" style="margin: 0;">Dang chay: ${escapeHtml((scrapeProgress.currentBatchProfileIds || []).join(", ") || "batch hien tai")}</p>
+      </div>
+    `
     : "";
 
   const defaultRange = STATS_RANGES[0];
@@ -1022,6 +1176,13 @@ export function renderStatsPage({ profiles, latestByProfile, aggregate, scrapeIn
     const data = safeAggregate.ranges[range];
     const artworkRows = Array.isArray(data?.artworkRows) ? data.artworkRows : [];
     const totals = data?.totals || { profilesWithData: 0, artworks: 0, sales: 0, earnings: 0 };
+    const summaryRows = artworkRows.map((a, i) => renderArtworkRow(a, range, i)).join("");
+    const paddedRows = Math.max(0, SUMMARY_VISIBLE_ROWS - artworkRows.length);
+    const emptyState = artworkRows.length === 0
+      ? `<p class="mini" style="color: var(--muted); margin: 0 0 10px;">ChÆ°a cÃ³ artwork nÃ o trong range nÃ y. Báº¥m "Láº¥y dá»¯ liá»‡u" Ä‘á»ƒ scrape.</p>`
+      : "";
+    const fullTableRows = (artworkRows.length > 0 ? summaryRows : "")
+      + Array.from({ length: paddedRows }, () => renderArtworkEmptyRow()).join("");
 
     const tableRows = artworkRows.length > 0
       ? artworkRows.map((a, i) => renderArtworkRow(a, range, i)).join("")
@@ -1035,8 +1196,9 @@ export function renderStatsPage({ profiles, latestByProfile, aggregate, scrapeIn
           <span class="pill">Total Sales: ${totals.sales}</span>
           <span class="pill">Total Earnings: ${fmtMoney(totals.earnings)}</span>
         </div>
-        <div class="table-wrap">
-          <table>
+        ${emptyState}
+        <div class="table-wrap table-wrap--ten-rows">
+          <table class="stats-summary-table">
             <thead>
               <tr>
                 <th>STT</th>
@@ -1048,22 +1210,14 @@ export function renderStatsPage({ profiles, latestByProfile, aggregate, scrapeIn
                 <th>View products</th>
               </tr>
             </thead>
-            <tbody>${tableRows}</tbody>
+            <tbody>${artworkRows.length > 0 ? fullTableRows : fullTableRows || tableRows}</tbody>
           </table>
         </div>
       </div>
     `;
   }).join("");
 
-  const chartPanels = STATS_RANGES.map((range) => {
-    const data = safeAggregate.ranges[range];
-    const perProfile = data?.perProfile || [];
-    return `
-      <div class="range-panel" data-range="${escapeHtml(range)}" ${range === defaultRange ? "" : "hidden"}>
-        ${renderEarningsChart(perProfile)}
-      </div>
-    `;
-  }).join("");
+  const chartHtml = renderEarningsSummaryChart(safeAggregate.ranges);
 
   const rows = profiles.map((profile) => {
     const stat = latestByProfile.get(profile.profile_id);
@@ -1175,6 +1329,7 @@ export function renderStatsPage({ profiles, latestByProfile, aggregate, scrapeIn
           btn.textContent = visible ? 'Chi tiết' : 'Đóng';
         });
       });
+      ${scrapeInProgress ? "setTimeout(() => window.location.reload(), 5000);" : ""}
     })();
   `;
 
@@ -1197,6 +1352,7 @@ export function renderStatsPage({ profiles, latestByProfile, aggregate, scrapeIn
           <span class="pill">Đã có dữ liệu: ${scrapedCount}</span>
           <span class="pill">${scrapeInProgress ? "Đang scrape" : "Sẵn sàng"}</span>
         </div>
+        ${progressHtml}
         <div class="range-toggle-group">${rangeButtons}</div>
         ${aggregatePanels}
       </div>
@@ -1205,7 +1361,7 @@ export function renderStatsPage({ profiles, latestByProfile, aggregate, scrapeIn
     <section class="card" style="margin-top: 20px;">
       <h2 style="margin-top: 0;">Earnings Summary</h2>
       <p class="mini" style="color: var(--muted); margin-bottom: 12px;">Tổng earnings của tất cả profile, đổi theo nút bấm phía trên.</p>
-      ${chartPanels}
+      ${chartHtml}
     </section>
 
     <section class="card" style="margin-top: 20px;">

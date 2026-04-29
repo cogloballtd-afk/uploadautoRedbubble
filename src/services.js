@@ -48,6 +48,8 @@ function randomBetween(min, max) {
   return range.min + (Math.random() * (range.max - range.min));
 }
 
+const PAYMENT_SCRAPE_BATCH_SIZE = 10;
+
 function normalizeStatus(profile) {
   return {
     ...profile,
@@ -350,6 +352,8 @@ export function createAppService({
 }) {
   const activeExecutions = new Map();
   let paymentScrapeInProgress = false;
+  let paymentScrapeProgress = null;
+  let lastPaymentScrapeReport = null;
 
   function getDashboardProfiles() {
     const systemConfig = getSystemConfig(db);
@@ -1149,6 +1153,14 @@ export function createAppService({
     return paymentScrapeInProgress;
   }
 
+  function getPaymentScrapeProgress() {
+    return paymentScrapeProgress ? { ...paymentScrapeProgress } : null;
+  }
+
+  function getLastPaymentScrapeReport() {
+    return lastPaymentScrapeReport ? { ...lastPaymentScrapeReport } : null;
+  }
+
   function getStatsAggregateByRange() {
     const latest = getLatestPaymentStatsByProfile(db);
     const profiles = listDashboardProfiles(db).map(normalizeStatus).filter((p) => p.enabled);
@@ -1179,12 +1191,15 @@ export function createAppService({
       attachment = await browserClient.attachToSession({ session });
 
       const result = await browserClient.scrapePaymentHistory(attachment);
-      console.log(`[payment-scrape] payment_history ok ${profileId}: ${result.lineItems.length} items`);
+      const paymentLineItems = Array.isArray(result?.lineItems) ? result.lineItems : [];
+      console.log(`[payment-scrape] payment_history ok ${profileId}: ${paymentLineItems.length} items`);
 
       let studioData = null;
       try {
         studioData = await browserClient.scrapeStudioDashboard(attachment);
-        console.log(`[payment-scrape] studio_dashboard ok ${profileId}: control=${studioData.controlTag}, options=${studioData.optionLabels.length}, snapshots=${studioData.snapshots.length}`);
+        const optionLabels = Array.isArray(studioData?.optionLabels) ? studioData.optionLabels : [];
+        const snapshots = Array.isArray(studioData?.snapshots) ? studioData.snapshots : [];
+        console.log(`[payment-scrape] studio_dashboard ok ${profileId}: control=${studioData?.controlTag || ""}, options=${optionLabels.length}, snapshots=${snapshots.length}`);
       } catch (studioErr) {
         studioData = { error: studioErr.message };
         console.error(`[payment-scrape] studio_dashboard error ${profileId}: ${studioErr.message}`);
@@ -1192,13 +1207,13 @@ export function createAppService({
 
       insertPaymentStat(db, {
         profileId,
-        lineItems: result.lineItems,
+        lineItems: paymentLineItems,
         pageUrl: result.pageUrl,
         status: "success",
         errorMessage: null,
         studioData
       });
-      return { status: "success", count: result.lineItems.length };
+      return { status: "success", count: paymentLineItems.length };
     } catch (error) {
       insertPaymentStat(db, {
         profileId,
@@ -1251,16 +1266,76 @@ export function createAppService({
     try {
       const profiles = getDashboardProfiles().filter((p) => p.enabled);
       summary.total = profiles.length;
+      paymentScrapeProgress = {
+        status: "running",
+        batchSize: PAYMENT_SCRAPE_BATCH_SIZE,
+        totalProfiles: profiles.length,
+        processedProfiles: 0,
+        currentBatch: profiles.length > 0 ? 1 : 0,
+        totalBatches: Math.ceil(profiles.length / PAYMENT_SCRAPE_BATCH_SIZE),
+        success: 0,
+        skipped: 0,
+        errors: 0,
+        startedAt: new Date().toISOString(),
+        finishedAt: null,
+        currentBatchProfileIds: []
+      };
 
-      for (const profile of profiles) {
-        const result = await scrapeOnePaymentProfile(profile);
-        if (result.status === "success") summary.success += 1;
-        else if (result.status === "skipped") summary.skipped += 1;
-        else summary.errors += 1;
+      for (let i = 0; i < profiles.length; i += PAYMENT_SCRAPE_BATCH_SIZE) {
+        const batch = profiles.slice(i, i + PAYMENT_SCRAPE_BATCH_SIZE);
+        paymentScrapeProgress = {
+          ...paymentScrapeProgress,
+          currentBatch: Math.floor(i / PAYMENT_SCRAPE_BATCH_SIZE) + 1,
+          currentBatchProfileIds: batch.map((profile) => profile.profile_id)
+        };
+        const results = await Promise.all(batch.map((profile) => scrapeOnePaymentProfile(profile)));
+
+        for (const result of results) {
+          if (result.status === "success") summary.success += 1;
+          else if (result.status === "skipped") summary.skipped += 1;
+          else summary.errors += 1;
+        }
+
+        paymentScrapeProgress = {
+          ...paymentScrapeProgress,
+          processedProfiles: Math.min(i + batch.length, profiles.length),
+          success: summary.success,
+          skipped: summary.skipped,
+          errors: summary.errors
+        };
       }
 
+      lastPaymentScrapeReport = {
+        status: "completed",
+        total: summary.total,
+        success: summary.success,
+        skipped: summary.skipped,
+        errors: summary.errors,
+        startedAt: paymentScrapeProgress?.startedAt || new Date().toISOString(),
+        finishedAt: new Date().toISOString()
+      };
       return summary;
+    } catch (error) {
+      lastPaymentScrapeReport = {
+        status: "failed",
+        total: summary.total,
+        success: summary.success,
+        skipped: summary.skipped,
+        errors: summary.errors,
+        startedAt: paymentScrapeProgress?.startedAt || new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        errorMessage: error.message
+      };
+      throw error;
     } finally {
+      if (paymentScrapeProgress) {
+        paymentScrapeProgress = {
+          ...paymentScrapeProgress,
+          status: "completed",
+          finishedAt: new Date().toISOString(),
+          currentBatchProfileIds: []
+        };
+      }
       paymentScrapeInProgress = false;
     }
   }
@@ -1300,6 +1375,8 @@ export function createAppService({
     getPaymentStatsByProfile,
     getStatsAggregateByRange,
     isPaymentScrapeRunning,
+    getPaymentScrapeProgress,
+    getLastPaymentScrapeReport,
     runPaymentScrapeForSelected,
     runPaymentScrapeForProfile,
     getProfileDetail,
