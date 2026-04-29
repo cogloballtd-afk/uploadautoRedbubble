@@ -74,6 +74,33 @@ test("syncProfiles stores fetched profiles in the dashboard cache", async () => 
   assert.equal(profiles[0].profile_name, "Alpha");
 });
 
+test("syncProfiles removes stale profiles that no longer exist in GPM", async () => {
+  const root = makeTempDir();
+  const db = createDatabase(path.join(root, "app.sqlite"));
+  seedSystemConfig(db, {
+    gpmApiBaseUrl: "http://127.0.0.1:19995",
+    excelFilenameStandard: "input.xlsx",
+    logDir: path.join(root, "logs"),
+    artifactsDir: path.join(root, "artifacts")
+  });
+
+  upsertProfiles(db, [makeProfile("stale", "Old Profile")]);
+
+  const service = createAppService({
+    db,
+    config: { artifactsDir: path.join(root, "artifacts") },
+    gpmClient: {
+      listProfiles: async () => [makeProfile("p1", "Alpha")]
+    },
+    browserClient: {}
+  });
+
+  const profiles = await service.syncProfiles();
+  assert.equal(profiles.length, 1);
+  assert.equal(profiles[0].profile_id, "p1");
+  assert.equal(service.getProfileDetail("stale"), null);
+});
+
 test("startProfileRun processes all pending Excel rows, updates status, and closes profile", async () => {
   const root = makeTempDir();
   const db = createDatabase(path.join(root, "app.sqlite"));

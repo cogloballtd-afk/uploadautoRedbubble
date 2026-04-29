@@ -297,9 +297,25 @@ export function upsertProfiles(db, profiles) {
       raw_payload = excluded.raw_payload,
       synced_at = excluded.synced_at
   `);
+  const deleteMissingCache = db.prepare(`
+    DELETE FROM gpm_profiles_cache
+    WHERE profile_id = ?
+  `);
+  const incomingIds = new Set(profiles.map((profile) => String(profile.id)));
 
   db.exec("BEGIN");
   try {
+    const existingIds = db.prepare(`
+      SELECT profile_id
+      FROM gpm_profiles_cache
+    `).all();
+
+    for (const row of existingIds) {
+      if (!incomingIds.has(String(row.profile_id))) {
+        deleteMissingCache.run(row.profile_id);
+      }
+    }
+
     profiles.forEach((profile, index) => {
       upsertCache.run(
         profile.id,
