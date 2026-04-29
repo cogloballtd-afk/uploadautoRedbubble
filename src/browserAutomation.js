@@ -631,7 +631,11 @@ export class PlaywrightBrowserClient {
           }
           const cells = Array.from(tr.querySelectorAll("td")).map((td) => (td.textContent || "").trim());
           if (cells.length === 0 || cells.every((c) => !c)) continue;
-          artworks.push({ cells, products: [] });
+          const img = tr.querySelector("td img");
+          const thumbnailUrl = img ? (img.currentSrc || img.src || img.getAttribute("src") || "") : "";
+          const linkEl = tr.querySelector('td a[href*="/portfolio/"], td a[href*="/people/"]');
+          const artworkUrl = linkEl ? (linkEl.href || linkEl.getAttribute("href") || "") : "";
+          artworks.push({ cells, thumbnailUrl, artworkUrl, products: [] });
         }
         return { headers, artworks };
       });

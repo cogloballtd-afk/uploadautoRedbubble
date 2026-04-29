@@ -149,6 +149,26 @@ function layout({ title, body, script = "" }) {
         .view-products-detail > td {
           background: rgba(0,0,0,0.03);
         }
+        .artwork-thumb {
+          width: 56px;
+          height: 56px;
+          object-fit: cover;
+          border-radius: 8px;
+          border: 1px solid var(--line);
+          display: block;
+          background: rgba(0,0,0,0.04);
+        }
+        .artwork-thumb--placeholder {
+          width: 56px;
+          height: 56px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: var(--muted);
+          font-size: 0.75rem;
+        }
+        .artwork-thumb-link { display: inline-block; }
+        .artwork-thumb-link:hover .artwork-thumb { border-color: var(--accent); }
         .earnings-chart {
           display: grid;
           grid-template-columns: 220px 1fr;
@@ -911,11 +931,25 @@ function renderArtworkProductsDetail(artwork) {
   `;
 }
 
+function renderArtworkThumbnail(artwork) {
+  const url = typeof artwork.thumbnailUrl === "string" ? artwork.thumbnailUrl.trim() : "";
+  if (!url) {
+    return `<div class="artwork-thumb artwork-thumb--placeholder" title="Không có thumbnail (data cũ)">—</div>`;
+  }
+  const linkHref = artwork.artworkUrl && /^https?:\/\//i.test(artwork.artworkUrl) ? artwork.artworkUrl : url;
+  return `
+    <a href="${escapeHtml(linkHref)}" target="_blank" rel="noopener noreferrer" class="artwork-thumb-link">
+      <img class="artwork-thumb" src="${escapeHtml(url)}" alt="${escapeHtml(artwork.artworkName || "")}" loading="lazy" />
+    </a>
+  `;
+}
+
 function renderArtworkRow(artwork, range, idx) {
   const detailId = `art-${rangeKeyToId(range)}-${idx}`;
   return `
     <tr>
       <td>${artwork.stt}</td>
+      <td>${renderArtworkThumbnail(artwork)}</td>
       <td><span title="${escapeHtml(artwork.artworkName)}">${escapeHtml(artwork.artworkName)}</span></td>
       <td>
         <div><a href="/profiles/${encodeURIComponent(artwork.profileId)}">${escapeHtml(artwork.profileName)}</a></div>
@@ -928,7 +962,7 @@ function renderArtworkRow(artwork, range, idx) {
       </td>
     </tr>
     <tr id="${detailId}" class="view-products-detail" style="display: none;">
-      <td colspan="6">${renderArtworkProductsDetail(artwork)}</td>
+      <td colspan="7">${renderArtworkProductsDetail(artwork)}</td>
     </tr>
   `;
 }
@@ -991,7 +1025,7 @@ export function renderStatsPage({ profiles, latestByProfile, aggregate, scrapeIn
 
     const tableRows = artworkRows.length > 0
       ? artworkRows.map((a, i) => renderArtworkRow(a, range, i)).join("")
-      : `<tr><td colspan="6"><span class="mini" style="color: var(--muted);">Chưa có artwork nào trong range này. Bấm "Lấy dữ liệu" để scrape.</span></td></tr>`;
+      : `<tr><td colspan="7"><span class="mini" style="color: var(--muted);">Chưa có artwork nào trong range này. Bấm "Lấy dữ liệu" để scrape.</span></td></tr>`;
 
     return `
       <div class="range-panel" data-range="${escapeHtml(range)}" ${range === defaultRange ? "" : "hidden"}>
@@ -1006,6 +1040,7 @@ export function renderStatsPage({ profiles, latestByProfile, aggregate, scrapeIn
             <thead>
               <tr>
                 <th>STT</th>
+                <th>Image</th>
                 <th>Artwork</th>
                 <th>Profile</th>
                 <th>Products Sold</th>

@@ -99,6 +99,8 @@ function enrichArtwork(artwork, headers) {
   const cells = Array.isArray(artwork.cells) ? artwork.cells : [];
   const products = Array.isArray(artwork.products) ? artwork.products : [];
   const name = String(cells[0] ?? "").trim() || "(unnamed)";
+  const thumbnailUrl = typeof artwork.thumbnailUrl === "string" ? artwork.thumbnailUrl : "";
+  const artworkUrl = typeof artwork.artworkUrl === "string" ? artwork.artworkUrl : "";
 
   let productsSold = 0;
   let totalEarnings = 0;
@@ -114,7 +116,7 @@ function enrichArtwork(artwork, headers) {
     if (totalEarnings === 0) totalEarnings = parseMoney(cells[earningsCol]);
   }
 
-  return { name, productsSold, totalEarnings, products, cells };
+  return { name, productsSold, totalEarnings, products, cells, thumbnailUrl, artworkUrl };
 }
 
 function buildModernRangeStats(rangeData) {
@@ -266,6 +268,8 @@ export function buildStatsAggregate({ profiles, latestByProfile }) {
           totalEarnings: artwork.totalEarnings,
           products: artwork.products,
           cells: artwork.cells,
+          thumbnailUrl: artwork.thumbnailUrl,
+          artworkUrl: artwork.artworkUrl,
           source: stats.source
         });
       }
